@@ -1,3 +1,3 @@
-This Github repository includes the code and processed data used in the study: "Spatial heterogeneity, stromal phenotypes, and therapeutic vulnerabilities in colorectal cancer peritoneal metastasis", Ong JCA, Zhao JJ et al.
+This Github repository includes the code and processed data used in the study: "Spatial heterogeneity, stromal phenotypes, and therapeutic vulnerabilities in colorectal cancer peritoneal metastasis".
 
-For questions: josephjzhao[at]u.nus.edu
+Kindly contact josephjzhao[at]u.nus.edu for any enquiries.
