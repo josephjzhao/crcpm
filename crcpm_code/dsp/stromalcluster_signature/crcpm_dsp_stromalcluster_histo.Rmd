@@ -1,0 +1,83 @@
+---
+title: "Histo features comparisons across SC"
+author: "Joseph J Zhao"
+date: "4/12/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+package.name=c(
+  # data manipulation
+  "tidyverse", "readr", "readxl", "dplyr", "tidyr", "lubridate", "tibble", "plyr", "devtools", "stringr", "stringi", "gtools",
+  # parallel processing
+  "doParallel", "parallel", "foreach",
+  # bioinformatics
+  "DESeq2", "BiocParallel", "clusterProfiler",
+  # survival analysis
+  "survminer", "survival", "rstpm2", "survRM2",
+  # regression stuff
+  "MASS", "splines", "Hmisc", "rms",
+  # misc
+  "cluster", "ResourceSelection", "digitize",
+  # plotting
+  "blandr", "pheatmap", "ggrepel", "ggplot2", "corrplot", "ggpubr", "gplots", "grid", "tableone"
+)
+
+for (package.name in package.name){
+  tryCatch(
+  {
+  if (!require(package.name, character.only = TRUE)){ 
+    install.packages(package.name, character.only = TRUE) 
+    library(package.name, character.only = TRUE)} else {library(package.name, character.only = TRUE)}
+  }, 
+    error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+```
+
+## Set main working directory
+
+```{r working directory}
+wd="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/"
+setwd(wd)
+
+dir.create(paste(wd,"output/", Sys.Date(), sep=""))
+setwd(paste(wd, "output/",Sys.Date(), sep="") )
+
+```
+
+import histo features
+
+```{r}
+
+path="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/submissions/substudies/crcpm/submissions/ccr/r1/workings"
+
+crcpm_dspstromalclusters <- read_csv(paste0(path, "/data/dsp/crcpm_stromalclusters/crcpm_dspstromalclusters_results.csv"))[-1]
+df_dsp_ref_stromalcluster <- read_excel(paste0(path, "/data/dsp/crcpm_stromalclusters/dsp_crc_sc_annotated.xls"))[,-1]
+
+df_dsp_ref_stromalcluster=left_join(df_dsp_ref_stromalcluster, crcpm_dspstromalclusters, by="dspid")
+
+df_dsp_ref_stromalcluster=subset(df_dsp_ref_stromalcluster, df_dsp_ref_stromalcluster$stromal_cluster %in% c("SC1", "SC2"), select=c(grep("histo_", colnames(df_dsp_ref_stromalcluster), value=T), "stromal_cluster"))
+
+df_dsp_ref_stromalcluster[is.na(df_dsp_ref_stromalcluster)]=0
+
+```
+
+```{r}
+
+tab_schistocomp=CreateTableOne(data=df_dsp_ref_stromalcluster, strata = "stromal_cluster", factorVars = grep("histo_", colnames(df_dsp_ref_stromalcluster), value=T),  testExact = fisher.test)
+
+write.csv(print(tab_schistocomp, exact=grep("histo_", colnames(df_dsp_ref_stromalcluster), value=T)), "tab_schistocomp.csv")
+
+```
+
+
+
+
+
+
+
+
+

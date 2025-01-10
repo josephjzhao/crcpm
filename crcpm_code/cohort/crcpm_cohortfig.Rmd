@@ -1,0 +1,262 @@
+---
+title: "CRC cohort fig"
+author: "Joseph J Zhao"
+date: "11/6/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+package.name=c(
+  # data manipulation
+  "tidyverse", "readr", "readxl", "dplyr", "tidyr", "lubridate", "tibble", "plyr", "stringr", "stringi", "gtools", "maditr", "reshape2",
+  # parallel processing
+  "doParallel", "parallel", "foreach",
+  # bioinformatics
+  "DESeq2","preprocessCore", "umap", "DGEobj.utils", "edgeR", "sva",
+  # survival analysis
+  "survminer", "survival", "rstpm2", "survRM2",
+  # regression stuff
+  "MASS", "splines",
+  # misc
+  "cluster", "ResourceSelection", "digitize", "statip", "dad",
+  # plotting
+  "blandr", "pheatmap", "ggrepel", "ggplot2", "corrplot", "ggpubr", "gplots", "grid", "ggbiplot", "ggsankey"
+)
+
+for (package.name in package.name){
+  tryCatch(
+  {
+  if (!require(package.name, character.only = TRUE)){ 
+    install.packages(package.name, character.only = TRUE) 
+    library(package.name, character.only = TRUE, quietly = T)} else {library(package.name, character.only = TRUE, quietly = T)}
+  }, 
+    error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+
+```
+
+## Set main working directory
+
+```{r working directory}
+wd="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/"
+setwd(wd)
+
+dir.create(paste(wd,"output/", Sys.Date(), sep=""))
+setwd(paste(wd, "output/",Sys.Date(), sep="") )
+
+```
+
+## load data
+
+```{r}
+
+path="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/submissions/substudies/crcpm/submissions/ccr/r1/workings"
+
+df_ref_pm_perpatient <- read_excel(paste0(path,"/data/reference/df_ref_pm_perpatient_crc.xlsx"))
+df_ref_pm_persample <- read_excel(paste0(path,"/data/reference/df_ref_pm_persample_annotated_crc.xlsx"))
+
+l_rnaseq <- readRDS(paste0(path,"/data/wts/l_crc_rnaseq.rds"))
+dsp_crc <- readRDS(paste0(path,"/data/dsp/dsp_crc.rds"))
+l_gipm_wes <- readRDS(paste0(path,"/data/wes/l_gipm_wes.rds"))
+l_lunaphore_crcpm <- readRDS(paste0(path,"/data/lunaphore/l_lunaphore_crcpm.rds"))
+
+```
+
+### sync up the persample and perpatient sheet
+
+dsp data incomplete as not inked up on persample or perpatient sheet as of 13/3/2024
+
+```{r}
+
+df_ref_pm_persample=subset(df_ref_pm_persample, (df_ref_pm_persample$rnaseq==1 | df_ref_pm_persample$wesid==1 | df_ref_pm_persample$dsp==1 | df_ref_pm_persample$lunaphore==1) & 
+                             !df_ref_pm_persample$primarypm=="UNK" & 
+                             df_ref_pm_persample$gccrc=="crc" &
+                             !df_ref_pm_persample$tumornormal=="UNK" &
+                             (df_ref_pm_persample$rnaseqid %in% colnames(l_rnaseq$gene_log2fpkm) |
+                                df_ref_pm_persample$wesid %in% unique(l_gipm_wes$wes_all$Sample) |
+                                df_ref_pm_persample$dspid %in% colnames(dsp_crc@assayData$q_norm) |
+                                df_ref_pm_persample$lunaphoreid %in% unique(l_lunaphore_crcpm$df_ref_perroi$lunaphoreid)))
+
+df_ref_pm_perpatient=subset(df_ref_pm_perpatient, df_ref_pm_perpatient$patientid %in% df_ref_pm_persample$patientid & df_ref_pm_perpatient$tumor_gccrc=="crc")
+df_ref_pm_persample=subset(df_ref_pm_persample, df_ref_pm_persample$patientid %in% df_ref_pm_perpatient$patientid)
+
+seqtype=c("rnaseq", "wes", "dsp", "lunaphore")
+for(i.seqtype in seqtype){df_ref_pm_persample[,i.seqtype]=ifelse(df_ref_pm_persample[,i.seqtype]==1, i.seqtype, NA)}
+
+df_ref_pm_persample$sampletype=paste0(df_ref_pm_persample$primarypm, "-", df_ref_pm_persample$tumornormal)
+
+```
+
+## retrieve sequencing information per patient
+
+```{r}
+
+n_total=0
+
+for (i.sampletype in c("primary-normal", "primary-tumor", "peritoneal-normal", "peritoneal-tumor")){
+  df_ref_pm_perpatient[, i.sampletype]=NA
+  
+  n_persampletype=0
+  for (i.patientid in df_ref_pm_perpatient$patientid){
+  
+    df_temp=subset(df_ref_pm_persample, df_ref_pm_persample$patientid==i.patientid & df_ref_pm_persample$sampletype==i.sampletype)
+    
+    n=unique(df_temp$sampleid) %>% length
+    n_persampletype=n_persampletype+n
+    
+    if (nrow(df_temp)==0){next()}
+    
+    seq=str_replace_all(paste(
+    if(any(!is.na(df_temp$rnaseq))){"rnaseq"},
+    if(any(!is.na(df_temp$lunaphore))){"lunaphore"},
+    if(any(!is.na(df_temp$wes))){"wes"},
+    if(any(!is.na(df_temp$dsp))){"dsp"}, sep="-"
+    ), "^-*|-*$", ""
+    )
+
+    
+    df_ref_pm_perpatient[df_ref_pm_perpatient$patientid==i.patientid, i.sampletype]=seq
+    
+  }
+  
+  colnames(df_ref_pm_perpatient)[ncol(df_ref_pm_perpatient)]=paste0(i.sampletype, " (n=", n_persampletype, ")")
+  
+  n_total=n_total+n_persampletype
+  
+}
+
+n_total
+
+```
+
+### prepare matrix
+
+```{r}
+
+# matrix -----
+seq_levels=c("nil", "rnaseq", "wes", "dsp", "lunaphore", "rnaseq--wes", "rnaseq-wes-dsp")
+
+mat=df_ref_pm_perpatient[, (ncol(df_ref_pm_perpatient)-3):ncol(df_ref_pm_perpatient)] %>% as.data.frame()
+rownames(mat)=df_ref_pm_perpatient$patientid
+mat[is.na(mat)]="nil"
+
+mat[,1:4]=apply(mat[,1:4], 2, function(x){as.numeric(factor(x, levels=seq_levels))})
+
+# prepare annotation -----
+
+colMeta=subset(df_ref_pm_perpatient, select=c("demo_age", "demo_gender", "demo_race")) %>% as.data.frame()
+rownames(colMeta)=df_ref_pm_perpatient$patientid
+
+# order matrix -----
+
+for (i.col in colnames(colMeta)){
+  colMeta=colMeta[order(colMeta[, (i.col)]),]
+}
+
+mat=mat[rownames(colMeta),]
+
+for (i.col in colnames(mat)){
+  mat=mat[order(mat[, (i.col)]),]
+}
+
+
+colMeta=colMeta[(rownames(mat)),]
+
+colMeta$patientid=rownames(colMeta)
+colMeta=left_join(colMeta, unique(subset(df_ref_pm_persample, select=c("patientid", "cohort"))), by="patientid")
+rownames(colMeta)=colMeta$patientid;colMeta$patientid=NULL
+
+colnames(colMeta)=c("Age", "Gender", "Race", "Cohort")
+
+colMeta=colMeta[rev(order(colMeta$Cohort)), ]
+
+mat=mat[rownames(colMeta),]
+
+```
+
+
+### heatmap of samples
+
+```{r}
+
+# print heatmap -----
+
+my_palette=colorRampPalette(c(rep("white", 1), rep("lightseagreen", 1), rep("olivedrab4", 1), rep("grey", 1), rep("purple",1), rep("darkgoldenrod2",1)))(n = 6)
+my_colour = list("Onset of PM" =  c("synchronous PM"  = "firebrick3", "metachronous PM" = "dodgerblue3", "no PM"= "goldenrod3"),
+                 "Histology"=c("Adenocarcinoma"="pink1", "Others"="grey60"))
+
+pdf(paste0(Sys.Date(),"cohortfig_crc.pdf"), height=8, width=17)
+pheatmap(t(mat), 
+                    main=paste0("N=",  nrow(mat), " patients, n=", n_total, " samples"),
+                    col=my_palette,
+                    cluster_cols = F,
+                    cluster_rows = F,
+                    annotation_col =  colMeta,
+                    show_colnames = F,
+                    show_rownames = T,
+                    gaps_col = c(as.vector(cumsum(rev(table(colMeta$Cohort))))),
+                    # annotation_names_row = T,
+                    legend = TRUE, 
+                    border_color = NA, 
+                    annotation_colors = my_colour,
+                    cellwidth = 2.5,
+                    cellheight = 13,
+                    legend_labels = c("", "", "rnaseq-only", "wes-only", "dsp-only", "lunaphore-only", "rnaseq-wes"),
+                    legend_breaks = 0:6)
+
+dev.off(); dev.off();dev.off();dev.off();dev.off()
+
+
+```
+
+### rnaseq sample count
+- overall
+- wts; wes; dsp
+
+```{r}
+
+# unpaired analysis --------
+table(subset(df_ref_pm_persample, !is.na(df_ref_pm_persample$rnaseq))$sampletype)
+
+seq_method=c("rnaseq", "wes", "dsp", "lunaphore")
+
+# paired analysis ---------
+
+for (i.gccrc in unique(df_ref_pm_persample$gccrc)){
+  
+  df=subset(df_ref_pm_persample, df_ref_pm_persample$gccrc==i.gccrc) # ammend this to change the the profiling method, have not automated
+
+  sample_type=unique(df$sampletype)
+  combs=combinations(length(sample_type), 2)
+  
+  # prepare extraction matrix
+  out=matrix(ncol=length(sample_type), nrow=length(sample_type))
+  colnames(out)=sample_type
+  rownames(out)=sample_type
+  
+  for (i.combs in 1:nrow(combs)){
+    s1=sample_type[combs[i.combs, 1]]
+    s2=sample_type[combs[i.combs, 2]]
+    
+    df_temp=subset(df, df$sampletype %in% c(s1, s2))
+    df_temp=as.data.frame.matrix(table(df_temp$patientid, df_temp$sampletype))
+    
+    n_patients=nrow(df_temp[apply(df_temp, 1, function(x){!any(x==0)}),]) # count number of patients with paired data
+    n_samples=sum(df_temp[apply(df_temp, 1, function(x){!any(x==0)}),])
+    
+    out[s1, s2]=paste0("N=", n_patients, ", n=", n_samples)
+    out[s2, s1]=paste0("N=", n_patients, ", n=", n_samples)
+    
+  }
+  
+  print(i.gccrc)
+  print(out)
+  
+}
+
+write.csv(out, "crcpm_paired_samples_matrix.csv")
+
+```

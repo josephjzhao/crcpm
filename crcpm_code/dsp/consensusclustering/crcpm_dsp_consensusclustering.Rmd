@@ -1,0 +1,247 @@
+---
+title: "CRC peritoneal mets subtyping of stromal compartments"
+author: "Joseph J Zhao"
+date: "11/6/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+package.name=c(
+  # data manipulation
+  "tidyverse", "readr", "readxl", "dplyr", "tidyr", "lubridate", "tibble", "plyr", "devtools", "stringr", "stringi", "gtools", "reshape2",
+  # parallel processing
+  "doParallel", "parallel", "foreach",
+  # bioinformatics
+  "umap", "DGEobj.utils", "edgeR", "GSVA", "SpatialDecon",
+  # Machine learning
+  "factoextra", "NbClust", "CancerSubtypes", 
+  # survival analysis
+  "survminer", "survival", "rstpm2", "survRM2",
+  # regression stuff
+  "MASS", "splines", "Hmisc", "rms",
+  # misc
+  "cluster", "ResourceSelection", "digitize", "statip", "dad", "rstudioapi", "tableone",
+  # plotting
+  "blandr", "pheatmap", "ggrepel", "ggplot2", "corrplot", "ggpubr", "gplots", "grid", "EnvStats"
+)
+
+for (package.name in package.name){
+  tryCatch(
+  {
+  if (!require(package.name, character.only = TRUE)){ 
+    install.packages(package.name, character.only = TRUE) 
+    library(package.name, character.only = TRUE)} else {library(package.name, character.only = TRUE)}
+  }, 
+    error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+options(scipen=999)
+
+```
+
+## Set main working directory
+
+```{r working directory}
+wd="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/"
+setwd(wd)
+
+dir.create(paste(wd,"output/", Sys.Date(), sep=""))
+setwd(paste(wd, "output/",Sys.Date(), sep="") )
+
+```
+
+# Load count data and clinical data of combined gascad and peritoneal data     
+
+```{r}
+
+path="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/submissions/substudies/crcpm/submissions/ccr/r1/workings"
+
+dsp_crc=readRDS(paste0(path, "/data/dsp/dsp_crc.rds"))
+df_ref <- read_excel(paste0(path, "/data/reference/df_ref_pm_persample_annotated_crc.xlsx")) %>% data.frame
+df_ref_pm_perpatient <- read_excel(paste0(path, "/data/reference/df_ref_pm_perpatient_crc.xlsx"))
+dsp_crc_stroma_clusters_SS_JJZ <- read_excel(paste0(path, "/data/dsp/crcpm_stromalclusters/dsp_crc_sc_annotated.xls"))[,-1]
+dspid_remove=subset(dsp_crc_stroma_clusters_SS_JJZ, dsp_crc_stroma_clusters_SS_JJZ$exclude_ss==0)$dspid # exclude Lymphoid aggregates ROI (n=14)
+
+```
+
+## define inclusion criteria
+- peritoneal tumor samples
+
+```{r}
+
+df_ref=subset(df_ref, df_ref$dsp==1)
+
+df_rna_norm=dsp_crc@assayData$q_norm
+df_rna_norm=subset(df_rna_norm, select=!grepl(paste(dspid_remove, collapse="|"), colnames(df_rna_norm))) # remove lymphoid aggregates
+df_rna=dsp_crc@assayData$exprs_batch
+df_rna=subset(df_rna, select=!grepl(paste(dspid_remove, collapse="|"), colnames(df_rna))) # remove lymphoid aggregates
+
+```
+
+# Conduct clustering
+
+```{r}
+
+my_colour=list("primarypm"=c("primary"="dodgerblue3", "peritoneal"="firebrick3"))
+
+# prep reference sheet
+mRNA=df_rna_norm[,colnames(df_rna_norm) %in% subset(df_ref, df_ref$gccrc=="crc" & df_ref$dsproi=="stroma" )$dspid]
+
+p_sil_clust=fviz_nbclust(t(mRNA), hcut, method = c("wss")) + 
+    geom_vline(xintercept = 3, linetype = 2)
+
+pdf(paste(Sys.Date(),"crcpm_elbowplot.pdf"), height=3, width=4)
+print(p_sil_clust)
+dev.off();dev.off();dev.off()
+
+# run clustering with consensus clustering algorithm
+df_ref_clusters=subset(df_ref, df_ref$gccrc=="crc")
+    
+clust_CC=ExecuteCC(clusterNum=3, d=FSbyVar(mRNA, cut.type="topk",value=1000), maxK=3, clusterAlg="pam", distance="canberra")
+    
+df_peritonealcluster=as.data.frame(clust_CC$group)
+df_peritonealcluster$dspid=rownames(df_peritonealcluster)
+colnames(df_peritonealcluster)[1]="stromal_cluster"
+df_peritonealcluster$stromal_cluster=paste0("SC", df_peritonealcluster$stromal_cluster)
+  
+df_ref_clusters=left_join(df_ref_clusters, df_peritonealcluster, by="dspid")
+
+rowMeta=subset(df_ref_clusters, select=c(c("primarypm","tumornormal", "stromal_cluster"))) %>% as.data.frame()
+rownames(rowMeta)=df_ref_clusters$dspid
+
+rownames(clust_CC$distanceMatrix)=names(clust_CC$group)
+colnames(clust_CC$distanceMatrix)=names(clust_CC$group)
+
+heatmap=pheatmap(clust_CC$distanceMatrix,
+                cluster_cols = T,
+                cluster_rows = T,
+                cutree_cols = 3,
+                cutree_rows = 3,
+                annotation_col=rowMeta,
+                show_colnames = F,
+                show_rownames = F,
+                annotation_names_col = T,
+                annotation_names_row = F,
+                cellwidth = 1.5,
+                cellheight = 1.5,
+                treeheight_row=30,
+                treeheight_col=30,
+                border_color=NA,
+                annotation_colors = my_colour
+                )
+
+    
+pdf(paste(Sys.Date(), "crc_stromalclusters.pdf"), height=5, width=7)
+heatmap %>% print
+dev.off()
+
+pdf(paste(Sys.Date(), "crcpm_stromalclusters_silplot.pdf"), height=3, width=4)
+plot(silhouette_SimilarityMatrix(clust_CC$group, clust_CC$distanceMatrix), main=paste0("Silhouette plot"))
+dev.off()
+
+# import results (if previously done)
+# crcpm_dspstromalclusters_results <- read_csv(paste0(path, "/data/dsp/crcpm_stromalclusters/crcpm_dspstromalclusters_results.csv"))[-1]
+# df_ref_clusters=left_join(df_ref_clusters, crcpm_dspstromalclusters_results, by="dspid")
+
+# surv per patient ----
+## site agnostic
+df_surv_perpatient=table(df_ref_clusters$patientid, df_ref_clusters$stromal_cluster) %>% as.data.frame.matrix()
+
+## site specific for tumor samples only
+df_surv_perpatient_sitespecific=table(subset(df_ref_clusters, df_ref_clusters$tumornormal=="tumor")$patientid, paste0(subset(df_ref_clusters, df_ref_clusters$tumornormal=="tumor")$primarypm, "_", subset(df_ref_clusters, df_ref_clusters$tumornormal=="tumor")$stromal_cluster)) %>% as.data.frame.matrix()
+df_surv_perpatient_sitespecific=subset(df_surv_perpatient_sitespecific, select=grep("SC", colnames(df_surv_perpatient_sitespecific), value=T))
+
+# combine datasets
+df_surv_perpatient$patientid=rownames(df_surv_perpatient)
+df_surv_perpatient_sitespecific$patientid=rownames(df_surv_perpatient_sitespecific)
+df_surv_perpatient=left_join(df_surv_perpatient,df_surv_perpatient_sitespecific, by="patientid")
+
+df_surv_perpatient=left_join(df_surv_perpatient, subset(df_ref_pm_perpatient, select=c("patientid", grep("_status|_time|date|pci", colnames(df_ref_pm_perpatient), value=T))), by="patientid")
+
+# defining groups
+# site agnostic
+df_surv_perpatient$peritoneal_subtype2=ifelse(!df_surv_perpatient$SC2==0, "SC2", "no SC2")
+
+# site specific
+df_surv_perpatient$peritoneal_subtype2_peritoneal=ifelse(!df_surv_perpatient$peritoneal_SC2==0, "SC2 in PM", "no SC2 in PM")
+df_surv_perpatient$peritoneal_subtype2_primary=ifelse(!df_surv_perpatient$primary_SC2==0, "SC2 in PT", "no SC2 in PT")
+
+# cox model
+## Note: there is a need to exclude samples without profiled stromal ROI, as we are unable to account for their adjacent stromal phenotype 
+cox_sum_siteagnostic=coxph(Surv(surv_os_time, surv_os_status)~peritoneal_subtype2, data=subset(df_surv_perpatient, !(df_surv_perpatient$SC1+df_surv_perpatient$SC2+df_surv_perpatient$SC3)==0)) %>% summary
+cox_sum_peritoneal=coxph(Surv(surv_os_time, surv_os_status)~peritoneal_subtype2_peritoneal, data=subset(df_surv_perpatient, !(df_surv_perpatient$peritoneal_SC1+df_surv_perpatient$peritoneal_SC2+df_surv_perpatient$peritoneal_SC3)==0)) %>% summary
+cox_sum_primary=coxph(Surv(surv_os_time, surv_os_status)~peritoneal_subtype2_primary, data=subset(df_surv_perpatient, !(df_surv_perpatient$primary_SC1+df_surv_perpatient$primary_SC2)==0)) %>% summary
+
+l_df_truncated=list(overall=subset(df_surv_perpatient, !(df_surv_perpatient$SC1+df_surv_perpatient$SC2+df_surv_perpatient$SC3)==0),
+                    peritoneal=subset(df_surv_perpatient, !(df_surv_perpatient$peritoneal_SC1+df_surv_perpatient$peritoneal_SC2+df_surv_perpatient$peritoneal_SC3)==0),
+                    primary=subset(df_surv_perpatient, !(df_surv_perpatient$primary_SC1+df_surv_perpatient$primary_SC2)==0))
+
+l_var=list(overall="peritoneal_subtype2",
+           peritoneal="peritoneal_subtype2_peritoneal",
+           primary="peritoneal_subtype2_primary")
+
+# survival analysis ----
+
+for (i.subset in names(l_df_truncated)){
+  
+  form=as.formula(paste0("Surv(surv_os_time, surv_os_status)~",l_var[[i.subset]]))
+  
+  km=surv_fit(form, data=l_df_truncated[[i.subset]])
+  cox=coxph(form, data=l_df_truncated[[i.subset]])
+  
+  plot_km=ggsurvplot(
+    km,                     # survfit object with calculated statistics.
+    data = l_df_truncated[[i.subset]],  
+    size=0.8,# data used to fit survival curves.
+    risk.table = T,    
+    censor.shape="|",
+    censor.size = 1.2,
+    pval = TRUE,             # show p-value of log-rank test.
+    # pval.coord = c(50, 0.8),
+    pval.size=4,
+    legend.title="",
+    conf.int = F,         # show confidence intervals for 
+    palette = c("steelblue2", "seagreen4"),
+    xlim = c(0,max(df_surv_perpatient$surv_os_time)),
+    ylim = c(0,1),
+    xlab = "Time, days",   # customize X axis label.
+    ggtheme = theme_classic(), # customize plot and risk table with a theme.
+    risk.table.y.text.col = T, # colour risk table text annotations.
+    risk.table.y.text = F,# show bars instead of names in text annotations
+    ncensor.plot = F,     
+    risk.table.fontsize=2.7,
+    tables.theme = theme_cleantable(),
+    ylab="overall survival",
+    # ncensor.plot.height = length(cox$xlevels[[1]])*10
+    legend.labs = (paste(cox$xlevels[[1]]))
+    
+  )
+  
+  print(plot_km)
+
+  
+}
+
+pdf(paste(Sys.Date(), "crc_stromalclusters_km.pdf"), height=3.5, width=3.5)
+print(plot_km)
+dev.off()
+
+## pci score ---- (not included)
+print(CreateTableOne(data=subset(df_surv_perpatient, select=c("pm_pciscore1", "peritoneal_subtype2")), strata="peritoneal_subtype2"), nonnormal = "pm_pciscore1")
+
+plot_pci=ggplot()+
+  geom_boxplot(aes(x=peritoneal_subtype2, y=pm_pciscore1, fill=peritoneal_subtype2), data=subset(df_surv_perpatient, !(df_surv_perpatient$SC1+df_surv_perpatient$SC2+df_surv_perpatient$SC3)==0), notch = T, width=0.5) +
+  stat_n_text() +
+  labs(y="PCI score", x="")+
+  scale_fill_manual(values=c("steelblue2", "seagreen4")) +
+  guides(fill="none") +
+stat_compare_means(aes(x=peritoneal_subtype2, y=pm_pciscore1, fill=peritoneal_subtype2), data=subset(df_surv_perpatient, !(df_surv_perpatient$SC1+df_surv_perpatient$SC2+df_surv_perpatient$SC3)==0), tip.length = 0.03, method="t.test")
+
+# pdf(paste(Sys.Date(), "crc_stromalclusters_pciboxplot.pdf"), height=3.5, width=3.5)
+print(plot_pci)
+# dev.off()
+    
+```
+

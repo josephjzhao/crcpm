@@ -1,0 +1,135 @@
+---
+title: "WES analysis for peritoneal gccrc dataset"
+author: "Joseph J Zhao"
+date: "4/12/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+package.name=c(
+  # data manipulation
+  "tidyverse", "readr", "readxl", "dplyr", "tidyr", "lubridate", "tibble", "plyr", "stringr", "stringi", "gtools",
+  # parallel processing
+  "doParallel", "parallel", "foreach",
+  # bioinformatics
+  "DESeq2", "BiocParallel", "maftools",
+  # survival analysis
+  "survminer", "survival", "rstpm2", "survRM2",
+  # regression stuff
+  "MASS", "splines", 
+  # misc
+  "cluster", "ResourceSelection", "digitize",
+  # plotting
+  "blandr", "pheatmap", "ggrepel", "ggplot2", "corrplot", "ggpubr", "gplots", "grid"
+)
+
+for (package.name in package.name){
+  tryCatch(
+  {
+  if (!require(package.name, character.only = TRUE)){ 
+    install.packages(package.name, character.only = TRUE) 
+    library(package.name, character.only = TRUE)} else {library(package.name, character.only = TRUE)}
+  }, 
+    error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+```
+
+## Set main working directory
+
+```{r working directory}
+wd="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/"
+setwd(wd)
+
+dir.create(paste(wd,"output/", Sys.Date(), sep=""))
+setwd(paste(wd, "output/",Sys.Date(), sep="") )
+
+```
+
+# Load wes and clinical data
+
+```{r}
+
+path="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/submissions/substudies/crcpm/submissions/ccr/r1/workings"
+
+df_wes <- readRDS(paste0(path,"/data/wes/l_gipm_wes.rds"))$wes_all
+
+# prepare reference frame
+df_ref_pm_persample_annotated <- read_excel(paste0(path,"/data/reference/df_ref_pm_persample_annotated_crc.xlsx"))
+df_ref=subset(df_ref_pm_persample_annotated, df_ref_pm_persample_annotated$wes==1 & df_ref_pm_persample_annotated$tumornormal=="tumor")
+df_ref$Tumor_Sample_Barcode=df_ref$wesid
+df_ref$sampletype=factor(df_ref$sampletype, levels=c("primarytumor", "peritonealtumor"))
+
+df_wes=subset(df_wes, df_wes$Sample %in% df_ref$wesid)
+
+```
+
+
+https://www.bioconductor.org/packages/devel/bioc/vignettes/maftools/inst/doc/maftools.html
+
+## # restrict to validated driver genes
+https://www.nature.com/articles/s41586-022-05311-x
+
+```{r}
+
+driver_genes=c("SIRPA", "RNF6", "PTPRC", "PTPN11", "MTOR", "LATS1", "HRAS", "SMAD3", "PPP2R1A", "MAP2K4", "FLCN", "ERBB3", "EPHA3", "EGFR", "TGIF1", "TBX3", "PTEN", "NIN", "NF1", "MYH9", "MAP3K1", "DUSP16", "DICER1", "CTNNB1", "CCDC6", "BRCA2", "USP6", "PCBP1", "NBEA", "BCORL1", "BCOR", "AMER1", "TCF7L2", "SMAD4", "GRIN2A", "EP300", "BRAF", "BCL9", "WNK2", "TGFBR2", "NCOR2", "HSPG2", "GNAS", "ERBB2", "CARD11", "BIRC6", "ARID1A", "RNF43", "FBXW7", "ATM", "ARID1B", "BCL9L", "FAT3", "ACVR2A", "SOX9", "PIK3CA", "FAT4", "KRAS", "TP53", "APC", "PMS2", "MLH1", "MLH3", "POLE", "MSH2", "MSH6", "MSH3")
+
+```
+
+# Oncoplots
+
+color settings
+```{r fig.height=15, fig.width=17}
+
+# preparing colors
+cols = list(sampletype = c("primarytumor"="dodgerblue3", "peritonealtumor"="firebrick3"))
+
+```
+
+#### print oncoplot
+
+```{r}
+
+maf=read.maf(maf=df_wes[df_wes$Tumor_Sample_Barcode %in% subset(df_ref, df_ref$gccrc=="crc")$Tumor_Sample_Barcode, ], clinicalData=df_ref)
+
+pdf(paste(Sys.Date(),"peritoneal_crc_oncoplot.pdf"), height=5.5, width=9)
+oncoplot(maf, draw_titv = TRUE, top=30,  clinicalFeatures = c("sampletype"), annotationColor = cols, sortByAnnotation=T, gene_mar=10, genes=maf@gene.summary$Hugo_Symbol[maf@gene.summary$Hugo_Symbol %in% driver_genes][1:20])
+dev.off();dev.off();dev.off();dev.off()
+
+```
+
+## Cobarplot
+
+```{r}
+
+pdf(paste(Sys.Date(), "peritoneal_cobarplot_ptpm.pdf"), height=6, width=5)
+
+for (i.gccrc in "crc"){
+  
+
+  maf=read.maf(maf=df_wes[(df_wes$Tumor_Sample_Barcode %in% subset(df_ref, grepl(i.gccrc, df_ref$gccrc))$Tumor_Sample_Barcode),], clinicalData=df_ref)
+  mets.ce=clinicalEnrichment(maf = maf, clinicalFeature = 'primarypm')
+  
+  # derive proportions
+  mets.ce$pairwise_comparision$p_mutated_Feature1=as.numeric(str_split(mets.ce$pairwise_comparision$n_mutated_Feature1, " of ", simplify=T)[,1])/as.numeric(str_split(mets.ce$pairwise_comparision$n_mutated_Feature1, " of ", simplify=T)[,2])
+  mets.ce$pairwise_comparision$p_mutated_Feature2=as.numeric(str_split(mets.ce$pairwise_comparision$n_mutated_Feature2, " of ", simplify=T)[,1])/as.numeric(str_split(mets.ce$pairwise_comparision$n_mutated_Feature2, " of ", simplify=T)[,2])
+  
+  mets.ce$groupwise_comparision$p_mutated_group1=as.numeric(str_split(mets.ce$groupwise_comparision$n_mutated_group1, " of ", simplify=T)[,1])/as.numeric(str_split(mets.ce$groupwise_comparision$n_mutated_group1, " of ", simplify=T)[,2])
+  mets.ce$groupwise_comparision$p_mutated_group2=as.numeric(str_split(mets.ce$groupwise_comparision$n_mutated_group2, " of ", simplify=T)[,1])/as.numeric(str_split(mets.ce$groupwise_comparision$n_mutated_group2, " of ", simplify=T)[,2])
+  
+  # significant comparisons
+  subset(mets.ce$groupwise_comparision, mets.ce$groupwise_comparision$p_value<0.05 & mets.ce$groupwise_comparision$Hugo_Symbol %in% driver_genes)
+  
+  # prepare cobar plot
+  maf1=read.maf(maf=df_wes[(df_wes$Tumor_Sample_Barcode %in% subset(df_ref, grepl(i.gccrc, df_ref$gccrc) & df_ref$primarypm=="primary")$Tumor_Sample_Barcode),], clinicalData=df_ref)
+  maf2=read.maf(maf=df_wes[(df_wes$Tumor_Sample_Barcode %in% subset(df_ref, grepl(i.gccrc, df_ref$gccrc) & df_ref$primarypm=="peritoneal")$Tumor_Sample_Barcode),], clinicalData=df_ref)
+  
+  coBarplot(m1 = maf1, m2 = maf2, m1Name = "Primary tumor", m2Name = "Peritoneal tumor", orderBy="m2", pctSize=1.2, genes=rev(driver_genes[driver_genes %in% unique(df_wes$Hugo_Symbol)])[1:20], geneMar =5, normalize = T, yLims = c(-50:50), showPct = T, axisSize = 1.2)
+
+}
+dev.off()
+
+```
+

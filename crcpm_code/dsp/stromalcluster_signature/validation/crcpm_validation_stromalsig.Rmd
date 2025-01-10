@@ -1,0 +1,335 @@
+---
+title: "CRCPM stromal signature external validation"
+author: "Joseph J Zhao"
+date: "4/12/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+package.name=c(
+  # data manipulation
+  "tidyverse", "readr", "readxl", "dplyr", "tidyr", "lubridate", "tibble", "plyr", "devtools", "stringr", "stringi", "gtools",
+  # parallel processing
+  "doParallel", "parallel", "foreach", 
+  # bioinformatics
+  "DESeq2", "BiocParallel", "clusterProfiler", "singscore", "GSVA", "CMScaller", "EnvStats",
+  # survival analysis
+  "survminer", "survival", "rstpm2", "survRM2",
+  # regression stuff
+  "MASS", "splines", "Hmisc", "rms",
+  # misc
+  "cluster", "ResourceSelection", "digitize",
+  # plotting
+  "blandr", "pheatmap", "ggrepel", "ggplot2", "corrplot", "ggpubr", "gplots", "grid"
+)
+
+for (package.name in package.name){
+  tryCatch(
+  {
+  if (!require(package.name, character.only = TRUE)){ 
+    install.packages(package.name, character.only = TRUE) 
+    library(package.name, character.only = TRUE)} else {library(package.name, character.only = TRUE)}
+  }, 
+    error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+```
+
+## Set main working directory
+
+```{r working directory}
+wd="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/"
+setwd(wd)
+
+dir.create(paste(wd,"output/", Sys.Date(), sep=""))
+setwd(paste(wd, "output/",Sys.Date(), sep="") )
+
+```
+
+
+```{r}
+
+path="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/submissions/substudies/crcpm/submissions/ccr/r1/workings"
+l_crcpm_otherdatasets <- readRDS(paste0(path, "/data/validation_cohorts/l_crcpm_otherdatasets.rds"))
+
+# add dsp data for internal validation
+dsp_crc=readRDS(paste0(path, "/data/dsp/dsp_crc.rds"))
+crcpm_dspstromalclusters <- read_csv(paste0(path, "/data/dsp/crcpm_stromalclusters/crcpm_dspstromalclusters_results.csv"))[-1]
+pData(dsp_crc)=left_join(pData(dsp_crc), crcpm_dspstromalclusters, by="dspid")
+
+l_crcpm_otherdatasets$dsp_crc$ref_persample=subset(pData(dsp_crc), !is.na(pData(dsp_crc)$stromal_cluster))
+l_crcpm_otherdatasets$dsp_crc$gene_log2exp=dsp_crc@assayData$q_norm[, colnames(dsp_crc@assayData$q_norm) %in% l_crcpm_otherdatasets$dsp_crc$ref_persample$dspid]
+l_crcpm_otherdatasets$dsp_crc$ref_persample$rnaseqid=l_crcpm_otherdatasets$dsp_crc$ref_persample$dspid
+
+```
+
+Retrieve the sc2 score
+- Singscore
+- GSVA variations
+-- up only
+-- up minus down
+
+Prepare functions to retrieve scores
+
+```{r}
+# get sc score
+sc_score=function(df_rna_norm, n_genes){
+
+  l_dspdegttest=readRDS(paste0(path, "/data/dsp/crcpm_stromalclusters/l_dsp_sc_deg.rds"))
+  gs_up=l_dspdegttest$up$geneSymbol[1:n_genes]
+  gs_dn=l_dspdegttest$dn$geneSymbol[1:n_genes]
+  
+  tgfb_gs_up@geneIds=gs_up
+  tgfb_gs_up@geneIds=tgfb_gs_up@geneIds[tgfb_gs_up@geneIds %in% rownames(df_rna_norm)]
+  tgfb_gs_dn@geneIds=gs_dn
+  tgfb_gs_dn@geneIds=tgfb_gs_dn@geneIds[tgfb_gs_dn@geneIds %in% rownames(df_rna_norm)]
+  rankData <- rankGenes(df_rna_norm)
+  scoredf <- simpleScore(rankData, upSet = tgfb_gs_up, downSet = tgfb_gs_dn)
+  return(scoredf)
+}
+
+```
+
+retrieve scores; retrieve CMS status 
+- incomplete cannot resolve the loop for the different type
+
+```{r}
+
+n_genes=c(10)
+
+# define permutations for gsva
+gsva_perm=NULL
+# gsva_method=c("gsva", "ssgsea", "zscore")
+gsva_method=c("gsva")
+gsva_kcdf=c("Gaussian")
+for (i.method in gsva_method){for (i.kcdf in gsva_kcdf){gsva_perm=rbind(gsva_perm, c(method=i.method, kcdf=i.kcdf))}}
+gsva_perm=as.data.frame(gsva_perm)
+
+l_dspdegttest=readRDS(paste0(path, "/data/dsp/crcpm_stromalclusters/l_dsp_sc_deg.rds"))
+
+for (i.dataset in names(l_crcpm_otherdatasets)){
+  
+  df_rna_norm=l_crcpm_otherdatasets[[i.dataset]]$gene_log2exp
+  
+  # sc score ----
+  df_sc_score=data.frame(rnaseqid=colnames(df_rna_norm))
+  for (i.n_genes in n_genes){
+    df_sc_score_temp=sc_score(df_rna_norm, i.n_genes)
+    colnames(df_sc_score_temp)=paste0(colnames(df_sc_score_temp), "_", i.n_genes)
+    df_sc_score=cbind(df_sc_score, df_sc_score_temp)
+
+  }
+  
+  l_crcpm_otherdatasets[[i.dataset]]$ref_persample=left_join(df_sc_score, l_crcpm_otherdatasets[[i.dataset]]$ref_persample, by="rnaseqid")
+  
+}
+
+```
+
+# print t test values
+
+```{r}
+
+sc_siggenes=bind_rows(l_dspdegttest$up[1:10,], 
+          l_dspdegttest$dn[1:10,])
+
+sc_siggenes[,grepl("t_", colnames(sc_siggenes))]=apply(sc_siggenes[,grepl("t_", colnames(sc_siggenes))],2, function(x){(x)*(-1)})
+
+sc_siggenes[,2:ncol(sc_siggenes)]=apply(sc_siggenes[,2:ncol(sc_siggenes)], 2, function(x){formatC(x, format = "e", digits = 2)})
+
+write.csv(sc_siggenes, "sc_siggenes_ttest.csv")
+
+```
+
+
+internal validation
+
+```{r}
+
+df_temp=sc_score(as.matrix(dsp_crc@assayData$q_norm), 10)
+df_temp$dspid=df_temp %>% rownames
+
+df_temp=left_join(df_temp, crcpm_dspstromalclusters, by="dspid")
+df_temp$stromal_cluster[is.na(df_temp$stromal_cluster)]="tumor"
+
+comp=compare_means(TotalScore~stromal_cluster, data=df_temp)
+comp=subset(comp, comp$group1=="SC2"|comp$group2=="SC2")
+my_comparisons=list()
+for(i.comps in 1:nrow(comp)){my_comparisons[[i.comps]]=c(comp$group1[[i.comps]], comp$group2[[i.comps]])}
+
+plot_intval=ggplot(aes(x=(stromal_cluster), y=TotalScore, fill=stromal_cluster), data=subset(df_temp, !is.na(df_temp$stromal_cluster))) +
+  labs(title = "Internal validation of the SC2 signature", y="SC2 signature", x="") +
+  geom_boxplot(notch=T, width=0.3) +
+  stat_n_text()+
+  guides(fill="none")+
+  scale_fill_manual(values=c("SC1"="goldenrod3", "SC2"="seagreen4", "SC3"="pink3", "tumor"="steelblue3")) +
+  stat_compare_means(comparisons = my_comparisons, method="t.test", label = "p")
+
+pdf(paste(Sys.Date(), "crcpm_sc_internalvalidation.pdf"), height=3, width=3)
+print(plot_intval)
+dev.off()
+  
+```
+
+heatmap of up and down genes
+
+```{r}
+
+rowMeta=data.frame(deg=c(rep("up", n_genes), rep("down", n_genes)), geneSymbol=c(l_dspdegttest$up$geneSymbol[1:10],l_dspdegttest$dn$geneSymbol[1:10]))
+rownames(rowMeta)=rowMeta$geneSymbol; rowMeta$geneSymbol=NULL
+
+colMeta=subset(df_temp, select=c("TotalScore", "stromal_cluster", "dspid"))
+rownames(colMeta)=colMeta$dspid; colMeta$dspid=NULL
+colnames(colMeta[1])=c("SC2 signature")
+
+df_rna_norm=as.matrix(dsp_crc@assayData$q_norm)[rownames(as.matrix(dsp_crc@assayData$q_norm)) %in% rownames(rowMeta), ]
+
+l_cols=list(
+  stromal_cluster=c("SC1"="goldenrod3", "SC2"="seagreen3", "SC3"="pink3", "tumor"="steelblue3"),
+  deg=c("up"="firebrick3", "down"="dodgerblue3")
+)
+
+heat=pheatmap(df_rna_norm,
+         color = colorRampPalette(c(rep("goldenrod3", 2), "beige", rep("firebrick3", 2)))(50),
+         annotation_colors = l_cols,
+         show_colnames = F,
+         scale="row",
+         cellwidth = 0.6,
+         cellheight = 9,
+         clustering_distance_cols = "euclidean", 
+         clustering_method = "ward.D",
+         annotation_row = rowMeta,
+         annotation_col = colMeta)
+
+pdf(paste(Sys.Date(), "crcpm_stromalsig_upgdngenesheatmap",".pdf"), height=6, width=7)
+print(heat)
+dev.off();dev.off();dev.off()dev.off()
+
+
+```
+
+run survival analysis
+
+```{r}
+
+df_cutoff_ref=cbind(cutoff=c("median", "q1q4", "thirds", "zerosplit"), gap=c(0, 0.25, 1/6, 0)) %>% data.frame
+df_cutoff_ref$gap=df_cutoff_ref$gap %>% as.numeric
+
+pdf(paste(Sys.Date(), "crcpm_stromalsig_validationcohort",".pdf"), height=3.25, width=3.5)
+
+df_scscore_variation_spam=data.frame()
+for (i.dataset in names(l_crcpm_otherdatasets)[1:3]){
+  for (i.geneorgs in  c("TotalScore_10")){
+    for (i.cutoff in c(2)){
+    
+    df_ref_exp_temp=l_crcpm_otherdatasets[[i.dataset]]$ref_persample
+    df_rna_norm=l_crcpm_otherdatasets[[i.dataset]]$gene_log2exp
+    colnames(df_ref_exp_temp)[colnames(df_ref_exp_temp)==i.geneorgs]="gene"
+      
+    df_ref_exp_surv=df_ref_exp_temp 
+
+    df_ref_exp_surv=subset(df_ref_exp_surv, !is.na(df_ref_exp_surv$surv_os_status) & !is.na(df_ref_exp_surv$surv_os_time))
+    
+    # for TCGA
+    if(i.dataset=="tcga"){
+      df_ref_exp_surv=subset(df_ref_exp_surv, !is.na(df_ref_exp_surv$surv_os_status) & !is.na(df_ref_exp_surv$surv_os_time) )
+    } else {
+      df_ref_exp_surv=subset(df_ref_exp_surv, !is.na(df_ref_exp_surv$surv_os_status) & !is.na(df_ref_exp_surv$surv_os_time))
+    }
+    
+    # convert to patient level for lenos
+    if(i.dataset=="lenos"){
+      df_ref_exp_surv=left_join(aggregate(gene ~ patientid, data = subset(df_ref_exp_surv, df_ref_exp_surv$primarypm %in% c("primary", "peritoneal")), mean),
+                unique(subset(df_ref_exp_surv, select=c("patientid", "surv_os_status", "surv_os_time"))), by="patientid") # if include both peritoneal and primary (main analysis)
+      
+      # df_ref_exp_surv=left_join(aggregate(gene ~ patientid, data = subset(df_ref_exp_surv, df_ref_exp_surv$primarypm %in% c("peritoneal")), mean),
+      #           unique(subset(df_ref_exp_surv, select=c("patientid", "surv_os_status", "surv_os_time"))), by="patientid") # only include peritoneal tumors
+  }
+  
+    # define splits
+    if (i.cutoff==4){
+      lowercutoff.n=0; uppercutoff.n=0
+    } else {
+    lowercutoff.n=quantile(df_ref_exp_surv$gene, probs = c(0.5-df_cutoff_ref$gap[i.cutoff]))[[1]]
+    uppercutoff.n=quantile(df_ref_exp_surv$gene, probs = c(0.5+df_cutoff_ref$gap[i.cutoff]))[[1]]
+    }
+
+    # define expression categories
+    df_ref_exp_surv$gene_exp=ifelse(df_ref_exp_surv$gene<=lowercutoff.n, "low", ifelse(df_ref_exp_surv$gene>=uppercutoff.n, "high", "mid"))
+    df_ref_exp_temp$gene_exp=ifelse(df_ref_exp_temp$gene<=lowercutoff.n, "low", ifelse(df_ref_exp_temp$gene>=uppercutoff.n, "high", "mid"))
+    
+    if(length(unique(df_ref_exp_surv$gene_exp))==1){next()}
+    
+    # survival analysis
+    df_ref_exp_surv=subset(df_ref_exp_surv, !df_ref_exp_surv$gene_exp=="mid")
+    i.outcome="surv_os"
+    
+    form=as.formula(paste0("Surv(", i.outcome, "_time, ", i.outcome, "_status) ~ gene_exp"))
+    cox=coxph(form, data=df_ref_exp_surv)
+    
+    sum.cox=summary(cox)
+    
+    df_scscore_variation_spam=bind_rows(df_scscore_variation_spam, c(dataset=i.dataset, scscore_variation=i.geneorgs, cutoff=df_cutoff_ref$cutoff[i.cutoff], logrank=sum.cox$sctest[[3]]))
+    
+    km=do.call(survfit, args = list(form, data = df_ref_exp_surv))
+    
+    plot_km=ggsurvplot(
+      km,                     # survfit object with calculated statistics.
+      data = df_ref_exp_surv,  
+      size=0.8,# data used to fit survival curves.
+      risk.table = T,    
+      censor.shape="|",
+      censor.size = 1.2,
+      pval = TRUE,             # show p-value of log-rank test.
+      # pval.coord = c(50, 0.8),
+      pval.size=4,
+      legend.title="SC2 signature",
+      conf.int = F,         # show confidence intervals for 
+      palette = c("seagreen4", "goldenrod3"),
+      xlim = c(0,max(df_ref_exp_surv$surv_os_time)),
+      ylim = c(0,1),
+      xlab = "Time, days",   # customize X axis label.
+      ggtheme = theme_classic(), # customize plot and risk table with a theme.
+      risk.table.y.text.col = T, # colour risk table text annotations.
+      risk.table.y.text = F,# show bars instead of names in text annotations
+      ncensor.plot = F,     
+      risk.table.fontsize=2.7,
+      tables.theme = theme_cleantable(),
+      ylab="overall survival",
+      ncensor.plot.height = length(cox$xlevels[[1]])*10,
+      legend.labs = (paste(cox$xlevels[[1]])),
+      title=paste(i.dataset)
+    )
+
+    print(plot_km)
+    
+    # serpine 1 levels
+    df_ref_exp_surv=df_ref_exp_temp
+  
+    df_gene_serpine1=data.frame("SERPINE1"=as.matrix(df_rna_norm)[rownames(as.matrix(df_rna_norm))=="SERPINE1",])
+    # colnames(df_gene_serpine1)[1]="SERPINE1"
+    df_gene_serpine1$rnaseqid=rownames(df_gene_serpine1)
+    
+    df_ref_exp_surv=left_join(df_ref_exp_surv, df_gene_serpine1, by="rnaseqid")
+    
+    df_ref_exp_surv$gene_exp=factor(df_ref_exp_surv$gene_exp, levels=c("low", "high"))
+    
+    plot_boxplotserpine=ggplot() +
+      geom_boxplot(aes(x=gene_exp, y=SERPINE1, fill=gene_exp), data=subset(df_ref_exp_surv, df_ref_exp_surv$gene_exp %in% c("high", "low")), notch=T, width=0.3) +
+      stat_compare_means(aes(x=gene_exp, y=SERPINE1, fill=gene_exp), data=subset(df_ref_exp_surv, df_ref_exp_surv$gene_exp %in% c("high", "low")), method="t.test") +
+      guides(fill="none")+ labs(y="PAI-1, log2(FPKM)", x="SC2 signature", title=i.dataset)+
+      scale_fill_manual(values=c("goldenrod3", "seagreen4")) +
+      stat_n_text(aes(x=gene_exp, y=SERPINE1, fill=gene_exp), data=subset(df_ref_exp_surv, df_ref_exp_surv$gene_exp %in% c("high", "low")), size=3)
+    
+    print(plot_boxplotserpine)
+    
+    }
+  }
+}
+
+dev.off();dev.off();dev.off();dev.off()
+
+```
+

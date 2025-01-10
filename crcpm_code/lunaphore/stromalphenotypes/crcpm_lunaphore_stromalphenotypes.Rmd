@@ -1,0 +1,284 @@
+---
+title: "stromal phenotypes orthogonal validation with lunaphore comet"
+author: "Joseph J Zhao"
+date: "11/6/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+package.name=c(
+  # data manipulation
+  "tidyverse", "readr", "readxl", "dplyr", "tidyr", "lubridate", "tibble", "plyr", "stringr", "stringi", "gtools", "maditr", "reshape2",
+  # parallel processing
+  "doParallel", "parallel", "foreach",
+  # bioinformatics
+  "DESeq2","preprocessCore", "umap", "DGEobj.utils", "edgeR", "sva", "sf", "RANN", "spatstat",
+  # survival analysis
+  "survminer", "survival", "rstpm2", "survRM2",
+  # regression stuff
+  "MASS", "splines",
+  # misc
+  "cluster", "ResourceSelection", "digitize", "statip", "dad",
+  # plotting
+  "blandr", "pheatmap", "ggrepel", "ggplot2", "corrplot", "ggpubr", "gplots", "grid", "ggbiplot", "ggsankey", "ggVennDiagram", "EnvStats"
+)
+
+for (package.name in package.name){
+  tryCatch(
+  {
+  if (!require(package.name, character.only = TRUE)){ 
+    install.packages(package.name, character.only = TRUE) 
+    library(package.name, character.only = TRUE, quietly = T)} else {library(package.name, character.only = TRUE, quietly = T)}
+  }, 
+    error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+
+```
+
+## Set main working directory
+
+```{r working directory}
+wd="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/"
+setwd(wd)
+
+dir.create(paste(wd,"output/", Sys.Date(), sep=""))
+setwd(paste(wd, "output/",Sys.Date(), sep="") )
+
+```
+
+import
+
+```{r}
+
+path="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/submissions/substudies/crcpm/submissions/ccr/r1/workings"
+l_lunaphore_crcpm=readRDS(paste0(path,"/data/lunaphore/l_lunaphore_crcpm.rds"))
+
+```
+
+heatmap overview of cell type density
+
+```{r}
+
+lcols=list("primarypm"=c("primary"="dodgerblue3", "peritoneal"="firebrick3"),
+            "ROI"=c("stroma"="darkgreen", "tumor"="steelblue3", "TSI"="grey"),
+           "distance from TSI"=RColorBrewer::brewer.pal(11, "BrBG"))
+
+colMeta=subset(l_lunaphore_crcpm$df_ref_perroi, select=c("primarypm", "roi_type")) %>% as.data.frame
+colMeta$roi_type=str_to_lower(colMeta$roi_type); colMeta$roi_type[colMeta$roi_type=="tumor_boundary"]="TSI"
+colnames(colMeta)=c("primarypm", "ROI")
+rownames(colMeta)=l_lunaphore_crcpm$df_ref_perroi$roiid
+heatmap_lunaphore_perroi=pheatmap(t(l_lunaphore_crcpm$df_celltypedensity_perroi), scale="column")
+df_lunaphore_clust=data.frame(lunaphore_clust=cutree(heatmap_lunaphore_perroi$tree_col, k=3))
+
+colMeta=merge(colMeta, df_lunaphore_clust, by="row.names")
+rownames(colMeta)=colMeta$Row.names; colMeta$Row.names=NULL
+
+heatmap_lunaphore_perroi=pheatmap(t(l_lunaphore_crcpm$df_celltypedensity_perroi), 
+         scale="column",
+         
+         clustering_distance_cols = "euclidean", 
+         clustering_method = "complete",
+         annotation_colors = lcols,
+         treeheight_row = 0,
+         # treeheight_col=200,
+         show_colnames = F,
+         annotation_col = colMeta)
+
+pdf(paste(Sys.Date(),paste0("_lunaphore_heatmapperroi.pdf")), height=3.5, width=10)
+heatmap_lunaphore_perroi
+dev.off()
+
+# include lunaphore_clust into original perroi reference sheet
+df_lunaphore_clust
+
+```
+
+DefineSC1 vs SC2 like clusters
+
+
+```{r}
+
+df_lunaphore_clust$roiid=rownames(df_lunaphore_clust)
+l_lunaphore_crcpm$df_ref_perroi=left_join(l_lunaphore_crcpm$df_ref_perroi, df_lunaphore_clust, by="roiid")
+
+# write.csv(l_lunaphore_crcpm$df_ref_perroi, "df_per_roi_lunaphoreclust.csv")
+
+# ignore this
+
+df_lunaphoreclust_perslide=table(subset(l_lunaphore_crcpm$df_ref_perroi, l_lunaphore_crcpm$df_ref_perroi$roi_type=="Stroma")$primarypm, subset(l_lunaphore_crcpm$df_ref_perroi, l_lunaphore_crcpm$df_ref_perroi$roi_type=="Stroma")$lunaphore_clust) %>% as.data.frame.matrix()
+df_lunaphoreclust_perslide$"3"=NULL
+chisq=chisq.test(df_lunaphoreclust_perslide, correct=F)
+colnames(df_lunaphoreclust_perslide)=c("SC1-like", "SC2-like")
+
+# check the breakdown of SC1 vs SC2 like stroma across PTPM - note that there are more primary samples to begin with
+
+df_lunaphoreclust_perslide_melt=melt(t(apply(df_lunaphoreclust_perslide, 2, function(x){x/sum(x)}) ))
+
+colnames(df_lunaphoreclust_perslide_melt)=c("lunaphore_clust", "primarypm", "prop")
+df_lunaphoreclust_perslide_melt$primarypm=factor(df_lunaphoreclust_perslide_melt$primarypm, levels=c("primary", "peritoneal"))
+df_lunaphoreclust_perslide_melt$lunaphore_clust=factor(df_lunaphoreclust_perslide_melt$lunaphore_clust, levels=c("SC1-like", "SC2-like"))
+
+plot_lunaphoreclustprimarypm_stackedbarchart=ggplot(aes(x=lunaphore_clust, y=prop, fill=primarypm), data=df_lunaphoreclust_perslide_melt) +
+  theme_classic2()+
+  labs(fill="", x="", y="% of ROI")+
+  scale_fill_manual(values = c("dodgerblue3", "firebrick3"))+
+    geom_bar(position="fill", stat="identity")
+
+pdf(paste(Sys.Date(),paste0("_lunaphore_clust_stackedbarchart.pdf")), height=3, width=3.5)
+print(plot_lunaphoreclustprimarypm_stackedbarchart)
+dev.off()
+
+
+```
+
+TSI distance vs stromal phenotypes
+- check if there is any correlation with TSI - as maybe SC2-like stroma is simply closer to tumor and hence is more pro-tumor
+
+```{r}
+
+df_temp=l_lunaphore_crcpm$df_ref_perroi
+
+df_temp$lunaphore_clust[df_temp$lunaphore_clust==1]="SC1-like"
+df_temp$lunaphore_clust[df_temp$lunaphore_clust==2]="SC2-like"
+
+plot_stromalcluster_distTSI=ggplot(aes(x=lunaphore_clust, y=dist_tsi/0.23), data=subset(df_temp, df_temp$roi_type=="Stroma" & !df_temp$lunaphore_clust=="3")) + 
+  geom_boxplot(width=0.5) +
+  labs(x="", y="distance from TSI, μm") +
+  stat_compare_means(method="t.test") +
+  facet_wrap(~primarypm)+
+  stat_n_text()
+
+pdf(paste(Sys.Date(),paste0("_lunaphore_plot_stromalcluster_distTSI.pdf")), height=3, width=4.5)
+print(plot_stromalcluster_distTSI)
+dev.off()
+
+```
+
+Evaluate spatial distribution
+https://www.paulamoraga.com/book-spatial/complete-spatial-randomness.html
+Analysing-spatial-point-patterns-in-R.pdf
+
+```{r}
+
+for (i.celltype in c("T cells", "B cells", "Fibroblasts", "CD163 macrophages", "CD68 macrophages", "Tumor cells")){
+  for (i.roiid in unique(l_lunaphore_crcpm$df_ref_percell$roiid)){
+  
+  
+    df_temp_cell=subset(l_lunaphore_crcpm$df_ref_percell, l_lunaphore_crcpm$df_ref_percell$roiid==i.roiid & !is.na(l_lunaphore_crcpm$df_ref_percell$celltype) & l_lunaphore_crcpm$df_ref_percell$celltype==i.celltype)
+
+    if (nrow(df_temp_cell)<10){next()}
+    
+    roi=ppp(df_temp_cell$X_position, df_temp_cell$Y_position, c(0, 2048), c(0, 2048))
+    
+    # spatial randomness evaluation
+    Q=quadratcount(roi, nx = 4, ny = 3)
+    # quadrat.test(Q, alternative = "two.sided") # is the distribution random
+    p_cluster=quadrat.test(Q, alternative = "clustered") # is the distribution clustered
+    
+    l_lunaphore_crcpm$df_ref_perroi[[paste0("p_clust_", i.celltype)]][l_lunaphore_crcpm$df_ref_perroi$roiid==i.roiid]=p_cluster$p.value[[1]]
+    
+    # neaarest nieghtbour distance
+    nndist=mean(nndist(roi))
+    
+    l_lunaphore_crcpm$df_ref_perroi[[paste0("nndist_", i.celltype)]][l_lunaphore_crcpm$df_ref_perroi$roiid==i.roiid]=nndist*0.23
+
+    if (p_cluster$p.value[[1]]>0.05 & nrow(df_temp_cell)>100){
+      plot(density(roi), main=""); plot(roi, add=T, pch=19, size=0.75, col=lcols[[i.celltype]])
+    }
+  }
+  
+  l_lunaphore_crcpm$df_ref_perroi[[paste0("p_clust_", i.celltype)]]=p.adjust(l_lunaphore_crcpm$df_ref_perroi[[paste0("p_clust_", i.celltype)]], method = "bonferroni")
+  
+}
+
+df_temp=subset(l_lunaphore_crcpm$df_ref_perroi, l_lunaphore_crcpm$df_ref_perroi$roi_type=="Stroma" & !l_lunaphore_crcpm$df_ref_perroi$lunaphore_clust==3)
+df_temp$lunaphore_clust=ifelse(df_temp$lunaphore_clust==1, "SC1-like", "SC2-like")
+
+df_temp_melt=reshape2::melt(subset(df_temp, select=c("primarypm", "roi_type", "lunaphore_clust", "nndist_T cells", "nndist_B cells", "nndist_Fibroblasts", "nndist_CD163 macrophages", "nndist_CD68 macrophages", "nndist_Tumor cells")))
+df_temp_melt$primarypm=factor(df_temp_melt$primarypm, levels=c("primary", "peritoneal"))
+df_temp_melt$variable=str_replace_all(df_temp_melt$variable, "nndist_", "")
+
+# between sc12 vs ptpm
+
+plot_nndistptpm=ggplot(aes(y=value, x=lunaphore_clust, color=lunaphore_clust), data=subset(df_temp_melt, !df_temp_melt$variable=="Tumor cells")) +
+  ggbeeswarm::geom_beeswarm(cex=2, size=0.75) +
+  stat_n_text() +
+  facet_wrap(~primarypm+variable, nrow = 2) +
+  scale_y_log10()+
+  guides(color="none")+
+  scale_color_manual(values=c("goldenrod3", "darkgreen"))+
+  stat_compare_means(method="t.test", size=4)+
+  labs(x="", y="average nearest neighbour\ndistance per ROI, μm")
+
+pdf(paste(Sys.Date(),paste0("_lunaphore_nndistscclust.pdf")), height=6, width=9)
+print(plot_nndistptpm)
+dev.off()
+
+# ptpm only
+plot_nndistptpm=ggplot(aes(y=value, x=primarypm, color=primarypm), data=subset(df_temp_melt, !df_temp_melt$variable=="Tumor cells")) +
+  ggbeeswarm::geom_beeswarm(cex=2, size=0.75) +
+  stat_n_text() +
+  facet_wrap(~variable, ncol=1) +
+  scale_y_log10()+
+  guides(color="none")+
+  scale_color_manual(values=c("dodgerblue3", "firebrick3"))+
+  stat_compare_means(method="t.test", size=4)+
+  labs(x="", y="average nearest neighbour\ndistance per ROI, μm")
+
+pdf(paste(Sys.Date(),paste0("_lunaphore_nndistptpm.pdf")), height=8, width=2.5)
+print(plot_nndistptpm)
+dev.off()
+
+```
+
+print out some of the images for review - manual selection
+
+```{r}
+
+lcols=c(RColorBrewer::brewer.pal(6, "Dark2"))
+names(lcols)=c("B cells", "CD163 macrophages", "CD68 macrophages","Fibroblasts",  "T cells", "Tumor cells")
+
+selected_roi=c("CRC_S19-008963_F-5_A09", "CRC_S17-4025_3-2_A11")
+
+pdf(paste(Sys.Date(),paste0("_lunaphore_roiplots.pdf")), height=3, width=4.5)
+
+for (i.roiid in selected_roi){
+  
+  df_temp=subset(l_lunaphore_crcpm$df_ref_percell, l_lunaphore_crcpm$df_ref_percell$roiid==i.roiid & !is.na(l_lunaphore_crcpm$df_ref_percell$celltype))
+  
+  plot_individualroi=ggplot() + 
+    theme_void()+
+    geom_point(aes(x=X_position, y=Y_position, color=celltype), data=df_temp) +
+    labs(color="")+
+    scale_color_manual(values=lcols)
+  
+  print(plot_individualroi)
+  
+}
+
+dev.off()
+
+selected_roi=c("CRC_S19-008963_F-5_A09", "CRC_S17-4025_3-2_A11")
+
+pdf(paste(Sys.Date(),paste0("_lunaphore_roicelltypedensityplot.pdf")), height=4.5, width=4.5)
+
+for (i.roiid in selected_roi){
+  for (i.celltype in c("T cells", "B cells", "Fibroblasts", "CD163 macrophages", "CD68 macrophages", "Tumor cells")[c(1,3)]){
+  
+  
+    df_temp_cell=subset(l_lunaphore_crcpm$df_ref_percell, l_lunaphore_crcpm$df_ref_percell$celltype==i.celltype & l_lunaphore_crcpm$df_ref_percell$roiid==i.roiid)
+  
+    roi=ppp(df_temp_cell$X_position, df_temp_cell$Y_position, c(0, 2048), c(0, 2048))
+    
+  plot(density(roi), main=paste0(i.roiid, "\n",i.celltype)); plot(roi, add=T, pch=19, size=0.5, col="black")
+    
+  }
+}
+
+dev.off()
+
+```
+

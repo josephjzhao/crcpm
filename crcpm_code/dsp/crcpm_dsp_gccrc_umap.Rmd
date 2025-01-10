@@ -1,0 +1,127 @@
+---
+title: "CRC dsp umap"
+author: "Joseph J Zhao"
+date: "11/6/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+package.name=c(
+  # DSP
+  "rstudioapi", "NanoStringNCTools", "GeomxTools", "GeoMxWorkflows", "here", "kableExtra", "readxl", "openxlsx",  "gghighlight",
+  # data manipulation
+  "tidyverse", "readr", "readxl", "dplyr", "tidyr", "lubridate", "tibble", "plyr", "devtools", "stringr", "stringi", "gtools", "knitr",
+  # parallel processing
+  "doParallel", "parallel", "foreach", "doSNOW",
+  # bioinformatics
+  "DESeq2","preprocessCore", "umap", "corto", "GSVA", "GSEABase", "DGEobj.utils", "msigdbr",
+  # survival analysis
+  "survminer", "survival", "rstpm2", "survRM2",
+  # regression stuff
+  "MASS", "splines",
+  # misc
+  "cluster", "ResourceSelection", "digitize", "reshape2", "reshape", "vegan",
+  # plotting
+  "blandr", "pheatmap", "ggrepel", "ggplot2", "corrplot", "ggpubr", "gplots", "grid", "randomcoloR", "ggforce", "cowplot"
+)
+
+for (package.name in package.name){
+  tryCatch(
+  {
+  if (!require(package.name, character.only = TRUE)){ 
+    install.packages(package.name, character.only = TRUE) 
+    library(package.name, character.only = TRUE)} else {library(package.name, character.only = TRUE)}
+  }, 
+    error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+```
+
+## Set main working directory
+
+```{r working directory}
+wd="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/"
+setwd(wd)
+
+dir.create(paste(wd,"output/", Sys.Date(), sep=""))
+setwd(paste(wd, "output/",Sys.Date(), sep="") )
+
+```
+
+## Load CRC DSP file
+
+```{r}
+
+path="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/submissions/substudies/crcpm/submissions/ccr/r1/workings"
+
+# load processed dsp geomx object
+dsp_crc=readRDS(paste0(path, "/data/dsp/dsp_crc.rds"))
+
+# load into lists
+l_dsp=list("colorectal"=dsp_crc)
+l_rna=list("colorectal"=dsp_crc@assayData$q_norm)
+l_ref=list("colorectal"=pData(dsp_crc))
+
+```
+
+# UMAP analysis
+
+```{r}
+
+for (i.gccrc in names(l_dsp)){
+  
+  pdf(paste(Sys.Date(),paste0(i.gccrc, "_dsp_umap.pdf")), height=3, width=5)
+  
+  custom_umap <- umap::umap.defaults
+  custom_umap$random_state <- 30
+  
+  # run UMAP
+  umap_out <- umap(t(log2(l_dsp[[i.gccrc]]@assayData$q_norm)), config = custom_umap)
+  
+  l_ref[[i.gccrc]][, c("UMAP1", "UMAP2")] <- umap_out$layout[, c(1,2)]
+  df_umap=l_ref[[i.gccrc]] %>% data.frame
+  
+  plot_umap=ggplot() +
+    geom_point(aes(x = UMAP1, y = UMAP2, shape = class, color=region), data=df_umap, size = 1.5) +
+    scale_color_manual(values = c("peritoneal-metastasis"="firebrick3", "primary-tumor"="dodgerblue3", "primary-normal"="goldenrod3")) +
+    scale_shape_manual(values=c("circle", "triangle"))+
+    theme_bw() +
+    labs(shape="", col="")
+  
+  # add ellipse -----
+  theta <- c(seq(-pi, pi, length = 50), seq(pi, -pi, length = 50))
+  circle <- cbind(cos(theta), sin(theta))
+  ellipse.prob = 0.6
+  
+  ell <- ddply(df_umap[, c("group", "UMAP1", "UMAP2")], .(group), function(x) {
+            if(nrow(x) <= 2) {
+            return(NULL)
+            }
+            sigma <- var(cbind(x$UMAP1, x$UMAP2))
+            mu <- c(mean(x$UMAP1), mean(x$UMAP2))
+            ed <- sqrt(qchisq(ellipse.prob, df = 2))
+            data.frame(sweep(circle %*% chol(sigma) * ed, 2, mu, FUN = '+'))
+  })
+  
+  names(ell)[2:3] <- c('UMAP1', 'UMAP2')
+  ell$class=str_extract(ell$group, "tumor$|stroma")
+  ell$region=str_replace_all(ell$group, "-tumor$|-stroma", "")
+  
+  plot_umap = plot_umap +
+    geom_path(aes(x=UMAP1, y=UMAP2, color = region), alpha=1, size=0.5, data = subset(ell, grepl("stroma|normal", ell$group))) +
+    geom_path(aes(x=UMAP1, y=UMAP2, color = region), alpha=1, size=0.5, data = subset(ell, grepl("-tumor$", ell$group))) 
+  
+  plot_umap %>% print
+  
+  
+  
+  dev.off() 
+}
+
+```
+
+
+
+

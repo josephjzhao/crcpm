@@ -1,0 +1,404 @@
+---
+title: "spatial decon for DSP data"
+author: "Joseph J Zhao"
+date: "4/5/2023"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Load packages
+
+```{r setup, include=FALSE}
+package.name=c(
+  # data manipulation
+  "tidyverse", "readr", "readxl", "dplyr", "tidyr", "lubridate", "tibble", "plyr", "stringr", "stringi", "gtools", "BiocManager", "GeomxTools",
+  # parallel processing
+  "doParallel", "parallel", "foreach", "doSNOW",
+  # bioinformatics
+  "DESeq2","preprocessCore", "umap", "corto", "GSVA", "GSEABase", "DGEobj.utils", "msigdbr", "SpatialDecon",
+  # survival analysis
+  "survminer", "survival", "rstpm2", "survRM2",
+  # regression stuff
+  "MASS", "splines", "DGEobj.utils", "DirichletReg",
+  # misc
+  "cluster", "ResourceSelection", "digitize", "reshape2", "reshape",
+  # plotting
+  "blandr", "pheatmap", "ggrepel", "ggplot2", "corrplot", "ggpubr", "gplots", "grid", "circlize", "ggbeeswarm", "see"
+)
+
+for (package.name in package.name){
+  tryCatch(
+  {
+  if (!require(package.name, character.only = TRUE)){ 
+    install.packages(package.name, character.only = TRUE) 
+    library(package.name, character.only = TRUE)} else {library(package.name, character.only = TRUE)}
+  }, 
+    error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+```
+
+## Set main working directory
+
+```{r working directory}
+wd="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/"
+setwd(wd)
+
+dir.create(paste(wd,"output/", Sys.Date(), sep=""))
+setwd(paste(wd, "output/",Sys.Date(), sep="") )
+
+```
+
+## load dataset and reference
+
+```{r}
+
+path="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/submissions/substudies/crcpm/submissions/ccr/r1/workings"
+
+dsp_crc=readRDS(paste0(path, "/data/dsp/dsp_crc.rds"))
+
+# load into lists
+l_dsp=list("colorectal"=dsp_crc)
+l_rna=list("colorectal"=dsp_crc@assayData$q_norm)
+l_ref=list("colorectal"=pData(dsp_crc))
+
+```
+
+# SpatialDecon: Impute immune cell levels
+original paper
+https://www.nature.com/articles/s41467-022-28020-5
+https://bioconductor.riken.jp/packages/devel/bioc/vignettes/SpatialDecon/inst/doc/SpatialDecon_vignette_NSCLC.html
+
+## Load reference dataframe
+
+```{r}
+
+data("safeTME")
+head(safeTME)
+data("safeTME.matches")
+head(safeTME.matches)
+
+```
+
+## running basic spatial decon
+
+```{r}
+
+l_spatialdecon=list()
+
+for (i.gccrc in names(l_dsp)){
+  
+  res = runspatialdecon(object = l_dsp[[i.gccrc]],
+                      norm_elt = "q_norm",
+                      raw_elt = "exprs_batch",
+                      X = safeTME,
+                      align_genes = TRUE)
+  
+  l_spatialdecon[[i.gccrc]]=res
+  
+}
+
+heatmap(t(res$beta), cexCol = 1, cexRow = 0.7, margins = c(10,7))
+
+```
+
+## running advanced spatial decon
+
+```{r}
+
+l_spatialdeconad=list()
+
+for (i.gccrc in names(l_dsp)){
+  
+  restils = runspatialdecon(object = l_dsp[[i.gccrc]],
+                            norm_elt = "q_norm",                    # normalized data
+                            raw_elt = "exprs_batch",                      # expected background counts for every data point in norm
+                            X = safeTME,                            # safeTME matrix, used by default
+                            cellmerges = safeTME.matches,           # safeTME.matches object, used by default
+                            cell_counts = l_dsp[[i.gccrc]]$nuclei,           # nuclei counts, used to estimate total cells
+                            is_pure_tumor = grepl("tumor", l_ref[[i.gccrc]]$group),          # identities of the Tumor segments/observations
+                            n_tumor_clusters = 5)                   # how many distinct tumor profiles to append to safeTME
+  
+  l_spatialdeconad[[i.gccrc]]=restils
+  
+}
+
+heatmap(sweep(restils@experimentData@other$SpatialDeconMatrix, 1, apply(restils@experimentData@other$SpatialDeconMatrix, 1, max), "/"),
+         labRow = NA, margins = c(10, 5))
+
+data("cellcols")
+
+# export
+
+# saveRDS(restils, file=paste0(wd, "data/dsp_gc/data/dsp_spatialdecon_gc.RData"))
+
+```
+
+plot advanced results - prop bar plot
+
+```{r fig.height=7, fig.width=10}
+
+o = hclust(dist(t(restils$cell.counts$cell.counts)))$order
+layout(mat = (matrix(c(1, 2), 1)), widths = c(7, 3))
+TIL_barplot(t(restils$cell.counts$cell.counts[, o]), draw_legend = TRUE, 
+            cex.names = 0.5)
+
+for (i.gccrc in names(l_spatialdeconad)){
+  restils=l_spatialdeconad[[i.gccrc]]
+  restils$prop_of_all = replace(restils$prop_of_all, is.na(restils$prop_of_all), 0)
+  o = hclust(dist(restils$prop_of_all))$order
+  TIL_barplot(t(restils$prop_of_all[o,]), draw_legend = TRUE, cex.names = 0.01, main=i.gccrc)
+}
+
+```
+
+### Heatmap of cell propotions
+
+```{r fig.height=5, fig.width=15}
+
+for (i.gccrc in names(l_spatialdeconad)){
+
+  restils=l_spatialdeconad[[i.gccrc]]
+  
+  colMeta=l_ref[[i.gccrc]][, c("region", "class")]
+  colMeta$region[colMeta$region=="peritoneal-tumor"]="peritoneal-metastasis"
+  
+  my_colour=list(
+    "region"=c("peritoneal-metastasis"="firebrick3", "primary-normal"="goldenrod3", "primary-tumor"="dodgerblue3"),
+    "class"=c("stroma"="green3", "tumor"="steelblue3")
+  )
+  
+  # print heatmap
+  
+  mat=restils$prop_of_all
+  mat[is.na(mat)]=0
+  
+  heat=pheatmap(t(mat),
+                col=brewer.pal(n=10, "YlGnBu"),
+                # scale="column",
+                cluster_cols = T,
+                clustering_distance_cols = "euclidean", 
+                # clustering_method = "ward.D2",
+                cluster_rows = T,
+                annotation_col=(colMeta),
+                show_colnames = F,
+                show_rownames = T,
+                annotation_names_col = T,
+                cellwidth = 1,
+                cellheight = 10,
+                border_color=NA,
+                annotation_colors = my_colour
+              )
+  
+  pdf(paste(Sys.Date(),i.gccrc, "dsp_immunedeconprop_heatmap.pdf"), height=5, width=13)
+  print(heat)
+  dev.off()
+}
+
+```
+
+
+## melt to long form
+
+```{r}
+
+l_immunedecon_melt=list()
+l_immunedecon_avg=list()
+
+for (i.dsp in names(l_spatialdeconad)){
+  df_melt=reshape2::melt(as.matrix(l_spatialdeconad[[i.dsp]]$prop_of_all))
+  colnames(df_melt)[1:2]=c("id", "var")
+  pData(l_dsp[[i.dsp]])$id=rownames(pData(l_dsp[[i.dsp]]))
+                                   
+  df=left_join(df_melt, pData(l_dsp[[i.dsp]]), by="id")
+  df$var=as.character(df$var)
+  l_immunedecon_melt[[i.dsp]]=df
+  
+  # df$patientid=ifelse(grepl("SC", df$patientid), str_extract(df$patientid, "SC\\d{3}"), df$patientid)
+  
+  l_immunedecon_avg[[i.dsp]]=df %>% group_by(var, id, region, class) %>% summarise(value=mean(value), .groups = 'drop')
+}
+
+```
+
+## export data
+
+```{r}
+
+saveRDS(l_immunedecon_melt, paste0(path, "/data/dsp/immunedecon/df_immunedecon_crc.rds"))
+
+```
+
+
+## Dirichlet regression for cell proportions across all comparisons (with ROI)
+- focus on PM PT comparisons
+
+```{r}
+
+# define groups - as per manual order (put normal primary stroma at the back as controls)
+groups=c("peritoneal-metastasis-stroma", "peritoneal-metastasis-tumor", "primary-tumor-tumor", "primary-tumor-stroma", "primary-normal-stroma") %>%  rev
+combs=combinations(length(groups), 2)
+
+l_dsp_dirich=list()
+
+for (i.gccrc in names(l_ref)){
+ 
+  l_ref[[i.gccrc]]$sample=rownames(l_ref[[i.gccrc]])
+  restils=l_spatialdeconad[[i.gccrc]]
+  
+  pdf(paste(Sys.Date(), i.gccrc, "dsp_immunedecon_dirchlolipop.pdf"), height=3.2, width=6)
+  
+  # for (i.gccrc in unique(df_ref$gccrc)){
+  for (i.combs in 1:nrow(combs)){
+      g1=groups[combs[i.combs, 1]]
+      g2=groups[combs[i.combs, 2]]
+    
+      df_temp=restils$prop_of_all %>% data.frame
+      df_temp$sample=rownames(df_temp)
+      
+      df_temp=left_join(df_temp, l_ref[[i.gccrc]][,c("group", "sample")], by="sample")
+      df_temp=subset(df_temp, 
+                    (grepl(g1, df_temp$group) | grepl(g2, df_temp$group)))
+      df_temp$group=factor(df_temp$group, levels=c(g1, g2))
+      
+      # prepare dirichlet regression model
+      AL <- DR_data((df_temp[,1:14]))
+      
+      mod=DirichReg(AL ~ group, df_temp)
+      sum.mod=summary(mod) 
+      
+      mat=sum.mod$coef.mat
+      mat=subset(mat, !rownames(mat)=="(Intercept)") %>% data.frame
+      
+      # cleaning
+      mat$cell=str_replace_all(colnames(df_temp)[1:14], "\\.", " ")
+      colnames(mat)=c("coef", "se", "z", "pvalue", "cell")
+      mat$padj=p.adjust(mat$pvalue, method="bonferroni")
+      mat$padj[is.na(mat$padj)]=1
+      rownames(mat)=NULL
+      
+      # cleaning data
+      mat$sig=ifelse(mat$padj<0.05, "p<0.05", "not sig")
+      mat$diffexp=ifelse(mat$coef<0, paste0("upregulated in ", g1), paste0("upregulated in ", g2))
+      
+      mat=mat[order(mat$coef), ]
+      mat$cell=factor(mat$cell, levels = mat$cell)
+      
+      # throw into list
+      l_dsp_dirich[[i.gccrc]][[paste(g2, " vs ", g1)]]=mat
+      
+      # lollipop plot
+      plot_dirich_dotplot=ggplot()+
+        geom_segment(data=mat, aes(x=cell, y=coef, xend=cell, yend=0, alpha=sig), size=1)+
+        theme(legend.position = "top") +
+        theme(axis.text.x=element_text(angle=90, hjust=1)) +
+        geom_point(data=mat, aes(x=cell, y=coef, alpha=sig, col=diffexp, size=abs(coef)), stroke=0) +
+        labs(y=paste0("dirichlet regression coefficient"), x="", col="", alpha="") +
+        scale_colour_manual(values=c("firebrick3", "dodgerblue3")) +
+        geom_hline(yintercept=0, color = "black") +
+        coord_cartesian(ylim=c(-1,1)) +
+        scale_alpha_manual(values=c(0.25,1)) +
+        scale_size(range = c(4,7)) +
+        guides(size = "none")
+      
+      plot_dirich_dotplot %>% print
+    
+}
+
+dev.off()
+  
+}
+
+```
+
+### Manual scatter plot comparisons for correlation
+
+```{r}
+
+for (i.gccrc in names(l_dsp_dirich)[2]){
+  
+  # prepare dataset
+  names(l_dsp_dirich[[i.gccrc]])
+  
+  df_temp1=l_dsp_dirich[[i.gccrc]]$`primary-tumor-tumor  vs  primary-tumor-stroma` # define comparison 1
+  df_temp2=l_dsp_dirich[[i.gccrc]]$`peritoneal-metastasis-stroma  vs  peritoneal-metastasis-tumor` # define comparison 2
+  df_temp2$coef=-df_temp2$coef
+  
+  rownames(df_temp1)=df_temp1$cell
+  rownames(df_temp2)=df_temp2$cell
+  
+  colnames(df_temp1)=paste0(colnames(df_temp1), "_1")
+  colnames(df_temp2)=paste0(colnames(df_temp2), "_2")
+  
+  # merge
+  df_temp_comb=merge(df_temp1, df_temp2, by="row.names")
+  
+  # pearson correlation
+  cor=cor.test(df_temp_comb$coef_1, df_temp_comb$coef_2)
+  
+  pdf(paste(Sys.Date(), i.gccrc, paste0("dsp_dirch_scatter_stroma.pdf")), height=4.5, width=5)
+  
+  p=ggplot(data=df_temp_comb, aes(x=coef_1, y=coef_2, alpha=(padj_1<0.05 | padj_2<0.05), col=diffexp_1,  label=cell_1)) +
+    geom_smooth(method=lm, color="grey20", se=T, alpha=0.3, fill="#69b3a2", linewidth=0.5)+
+    geom_point(stroke=NA, aes(size=abs(coef_1))) +
+    # scale_size_manual(values=c(6:8)) +
+    coord_cartesian(ylim=c(-2.5, 1), xlim=c(-2.5,1))+
+    scale_alpha_manual(values=c(0.6,1))+
+    scale_color_manual(values=c("goldenrod3", "firebrick3"))+
+    geom_vline(xintercept=0) +
+    geom_hline(yintercept=0) +
+    theme(legend.position = "none")+
+    geom_text_repel(min.segment.length = 0.005, box.padding = 0.5, size=3.5, max.overlaps = 20, color="black") +
+    # coord_cartesian(ylim=c(-2,2), xlim=c(-2,8)) +
+    labs(x="stroma                                 tumor\ndirichlet regression coefficient\nprimary tumor", y="peritoneal metastasis\ndirichlet regression coefficient\nstroma                                  tumor", title="Spatially resolved changes in immune composition")+
+    annotate("text", hjust=0 , x=min(df_temp_comb$coef_1),  y=1.5, label=paste0("Pearson, r=", format(round(cor$estimate[[1]],3), nsmall=3), ", ",
+         ifelse(cor$p.value<0.001, "p<0.001", paste0("p=", format(round(cor$p.value[[1]],3), nsmall=3)))) ) +
+    geom_abline(linetype=2)
+  
+  print(p)
+  
+  dev.off()
+  
+}
+
+
+```
+
+
+## focus on PT PM tumor ROI comparisons
+
+```{r}
+path="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/submissions/substudies/crcpm/submissions/ccr/r1/workings"
+
+dsp_crc=readRDS(paste0(path, "/data/dsp/dsp_crc.rds"))
+
+crcpm_dspstromalclusters <- read_csv(paste0(path, "/data/dsp/crcpm_stromalclusters/crcpm_dspstromalclusters_results.csv"))[-1]
+pData(dsp_crc)=left_join(pData(dsp_crc), crcpm_dspstromalclusters, by="dspid")
+
+df_immunedecon=readRDS(paste0(path, "/data/dsp/immunedecon/df_immunedecon_crc.rds"))
+df_immunedecon$dspid=str_replace_all(str_replace_all(df_immunedecon$id, ".dcc", ""), "-", "_")
+
+df_immunedecon=left_join(df_immunedecon, crcpm_dspstromalclusters, by="dspid")
+df_immunedecon$stromal_cluster[is.na(df_immunedecon$stromal_cluster)]="tumor"
+
+df_immunedecon$var=str_replace_all(df_immunedecon$var, "\\.", " ")
+
+```
+
+```{r}
+
+df_immunedecon$region=factor(df_immunedecon$region, levels=c("primary-tumor", "peritoneal-metastasis"))
+
+ggplot(aes(x=region, y=value, color=region), data=subset(df_immunedecon, df_immunedecon$class=="tumor" & grepl("Treg|T cells", df_immunedecon$var))) +
+  geom_point(position = position_jitterdodge(0.1, dodge.width = .1))+
+  stat_n_text()+
+  guides(color="none")+
+  scale_color_manual(values=c("dodgerblue3", "firebrick3"))+
+  labs(x="", y="proportion") +
+  stat_summary(fun = "mean", size = 3, shape=95, color="black") +
+  facet_wrap(~var, scale="free_y") +
+  stat_compare_means(method="t.test")
+
+```
+

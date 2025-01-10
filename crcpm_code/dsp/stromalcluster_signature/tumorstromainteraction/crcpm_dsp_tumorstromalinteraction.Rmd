@@ -1,0 +1,261 @@
+---
+title: "CRCPM DSP tumor stromal interaction"
+author: "Joseph J Zhao"
+date: "4/12/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+package.name=c(
+  # data manipulation
+  "tidyverse", "readr", "readxl", "dplyr", "tidyr", "lubridate", "tibble", "plyr", "devtools", "stringr", "stringi", "gtools",
+  # parallel processing
+  "doParallel", "parallel", "foreach", 
+  # bioinformatics
+  "DESeq2", "BiocParallel", "clusterProfiler", "singscore", "GSVA", "CMScaller", "EnvStats", "org.Hs.eg.db", "progeny",
+  # survival analysis
+  "survminer", "survival", "rstpm2", "survRM2",
+  # regression stuff
+  "MASS", "splines", "Hmisc", "rms",
+  # misc
+  "cluster", "ResourceSelection", "digitize",
+  # plotting
+  "blandr", "pheatmap", "ggrepel", "ggplot2", "corrplot", "ggpubr", "gplots", "grid", "RColorBrewer", "ggforce", "SpatialDecon"
+)
+
+for (package.name in package.name){
+  tryCatch(
+  {
+  if (!require(package.name, character.only = TRUE)){ 
+    install.packages(package.name, character.only = TRUE) 
+    library(package.name, character.only = TRUE)} else {library(package.name, character.only = TRUE)}
+  }, 
+    error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+```
+
+## Set main working directory
+
+```{r working directory}
+wd="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/"
+setwd(wd)
+
+dir.create(paste(wd,"output/", Sys.Date(), sep=""))
+setwd(paste(wd, "output/",Sys.Date(), sep="") )
+
+```
+
+# tumor to stroma interaction
+- evaluated at patient level
+- evaluated at slide level
+
+Patient level - already done in the clustering process
+
+```{r}
+
+path="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/submissions/substudies/crcpm/submissions/ccr/r1/workings"
+
+dsp_crc=readRDS(paste0(path, "/data/dsp/dsp_crc.rds"))
+crcpm_dspstromalclusters <- read_csv(paste0(path, "/data/dsp/crcpm_stromalclusters/crcpm_dspstromalclusters_results.csv"))[-1]
+
+df_ref_stromalclusters_perpatient <- read_excel(paste0(path,"/data/reference/df_ref_pm_perpatient_crc.xlsx"))
+df_ref_pm_persample <- read_excel(paste0(path,"/data/reference/df_ref_pm_persample_annotated_crc.xlsx"))
+
+
+df_ref_pm_persample=left_join(df_ref_pm_persample, subset(df_ref_stromalclusters_perpatient, select=c("patientid", grep("peritoneal", colnames(df_ref_stromalclusters_perpatient), value=T))), by="patientid")
+
+```
+
+Creating patient to slide id - does each patient/slide have SC2?
+
+```{r}
+
+pData(dsp_crc)$patientslideid=paste0(pData(dsp_crc)$patientid, "_",str_replace_all(str_extract(pData(dsp_crc)[,1], "(\\w|\\ )*"), "\\ ", ""))
+
+df_ref_patientslideid=subset(pData(dsp_crc), select=c("dspid", "patientid")); rownames(df_ref_patientslideid)=NULL
+df_ref_patientslideid=left_join(df_ref_patientslideid, crcpm_dspstromalclusters, by="dspid")
+df_ref_patientslideid$stromal_cluster[is.na(df_ref_patientslideid$stromal_cluster)]="tumor only"
+
+df_ref_patientslideid_tab=as.data.frame.matrix(table(df_ref_patientslideid$patientid, df_ref_patientslideid$stromal_cluster))
+
+df_ref_patientslideid_tab$SC2group=ifelse(df_ref_patientslideid_tab$SC2>0, "SC2", ifelse(df_ref_patientslideid_tab$SC1+df_ref_patientslideid_tab$SC2+df_ref_patientslideid_tab$SC3==0, NA, "no-SC2"))
+
+df_ref_patientslideid_tab$patientid=rownames(df_ref_patientslideid_tab)
+
+df_ref_patientslideid=left_join(df_ref_patientslideid, df_ref_patientslideid_tab, by="patientid")
+
+# combine
+df_ref_pm_persample=left_join(df_ref_pm_persample, df_ref_patientslideid, by="dspid")
+
+
+```
+
+now we want to delineate differences (primary vs peritoneum, SC2 vs non SC2)
+- pathways
+- immune cell types
+- target genes
+
+prepare pathway, immunecell type and target genes
+
+```{r}
+
+# pathways
+l_pathways=readRDS(paste0(path, "/data/reference/genesets/l_gspathway.RData"))
+l_pathways=l_pathways[grep( "HALLMARK", names(l_pathways))]
+names(l_pathways)=str_replace_all(names(l_pathways), "HALLMARK ", "")
+
+df_dsp_pathways=gsva(gsvaParam(dsp_crc@assayData$q_norm, l_pathways)) %>% t %>% as.data.frame()
+
+# immune decon
+data("safeTME"); head(safeTME)
+data("safeTME.matches"); head(safeTME.matches)
+
+restils = runspatialdecon(object = dsp_crc,
+                          norm_elt = "q_norm",                    # normalized data
+                          raw_elt = "exprs_batch",                      # expected background counts for every data point in norm
+                          X = safeTME,                            # safeTME matrix, used by default
+                          cellmerges = safeTME.matches,           # safeTME.matches object, used by default
+                          cell_counts = readRDS(dsp_crc)$nuclei,           # nuclei counts, used to estimate total cells
+                          is_pure_tumor = grepl("tumor", pData(dsp_crc)$group),          # identities of the Tumor segments/observations
+                          n_tumor_clusters = 5)
+
+df_dsp_spatialdecon=restils$prop_of_all %>% as.data.frame
+rownames(df_dsp_spatialdecon)=str_replace_all(str_replace_all(rownames(df_dsp_spatialdecon), ".dcc", ""), "-", "_")
+colnames(df_dsp_spatialdecon)=str_replace_all(colnames(df_dsp_spatialdecon), "\\.", " ")
+
+# target genes
+
+genes_tumor=c("SERPINE1", "FGFR1", "FGFR2", "PDL1", "MET", "RAS", "RAF", "MEK", "BRAF", "EGFR", "MYC", "PIK3CA", "DKK1", "TROP2A", "TACSTD2", "APC", "FBXW7", "NFE2L2", "PIK3R1", "KAL1", "NOTCH1", "SMAD4", "NTRK\\d{1}", "KEAP1", "CTNNB1", "MLH1", "STK11", "TEAD\\d{1}", "HPSE", "HPSE2")
+
+genes_kreidieh=c("CTLA4", "PD1", "PDL1", "LAG3", "TIM3", "TIGIT", "PVRIG", "NKG2A", "KLRC1", "CD73", "ADORA2A", "CD3", "CD19", "PMEL", "BCMA", "TNFRSF17", "CD16", "CEA", "EPCAM", "CD155")
+genes_immune=c("CD4A", "CD8A", "CTLA4", "FOXP3", "GZM1", "GZMB", "IFNG", "LAG3", "PDCD1", "CD274", "PRF1", "HAVCR2", "TIGIT", "ILT", "IDO\\d{1}", "PDL2")
+genes_immune=c(genes_immune, genes_kreidieh) %>% unique
+
+genes_tumor=c(rownames(dsp_crc@assayData$q_norm)[grep(paste(paste0("^", genes_tumor, "$"), collapse="|"), rownames(dsp_crc@assayData$q_norm))])
+genes_immune=c(rownames(dsp_crc@assayData$q_norm)[grep(paste(paste0("^", genes_immune, "$"), collapse="|"), rownames(dsp_crc@assayData$q_norm))])
+
+genes=c(genes_tumor, genes_immune)
+
+df_dsp_targetgene=t(dsp_crc@assayData$q_norm[grep(paste(paste0("^", genes, "$"), collapse="|"), rownames(dsp_crc@assayData$q_norm)), ]) %>%  as.data.frame()
+
+# progeny
+df_dsp_progeny=progeny(dsp_crc@assayData$q_norm, scale=T, z_scores=T)
+
+
+```
+
+prepare as list
+
+```{r}
+
+l_dspderivatives=list(
+  pathways=df_dsp_pathways,  
+  targetgene=df_dsp_targetgene,
+  immunecell=df_dsp_spatialdecon,
+  progeny=df_dsp_progeny
+)
+
+```
+
+heatmap (not used)
+
+```{r}
+
+my_colour=list("primarypm"=c("primary"="dodgerblue3", "peritoneal"="firebrick3"),
+               "peritoneal_subtype2"=c("SC2"="seagreen4", "SC1 or SC3"="steelblue1"))
+
+
+for (i.dspderivatives in names(l_dspderivatives)[1]){
+  
+  colMeta=subset(df_ref_pm_persample, select=c("dspid", "SC2group", "primarypm") , df_ref_pm_persample$gccrc=="crc" & !is.na(df_ref_pm_persample$SC2group) & df_ref_pm_persample$tumornormal=="tumor") %>% as.data.frame()
+
+  rownames(colMeta)=colMeta$dspid; colMeta$dspid=NULL
+  
+  pheatmap(t(l_dspderivatives[[i.dspderivatives]][rownames(colMeta), apply(l_dspderivatives[[i.dspderivatives]], 2, sd)>0.2]),
+           show_colnames = F,
+           # col=brewer.pal(n=11, "BrBG"),
+           annotation_colors = my_colour,
+           scale= "row",
+           clustering_distance_cols = "manhattan", clustering_method = "complete",
+           annotation_col = colMeta,
+           )
+
+  # dev.off()
+    
+}
+
+```
+
+create loop for comparisons - to do t test between patients with and without SC2
+
+```{r}
+
+out_ttest=data.frame()
+
+pdf(paste(Sys.Date(), "crcpm_dsp_tumorstromainteraction_progeny.pdf"), height=3.5, width=3)
+
+for (i.dspderivatives in names(l_dspderivatives)[4]){
+  
+  df_dspderivatives=l_dspderivatives[[i.dspderivatives]] %>% as.data.frame()
+  
+  
+    for (i.var in colnames(df_dspderivatives)){
+
+      df_temp=subset(df_ref_pm_persample, df_ref_pm_persample$gccrc=="crc" & df_ref_pm_persample$tumornormal=="tumor" & !is.na(df_ref_pm_persample$SC2group))
+      df_dspderivatives$dspid=rownames(df_dspderivatives)
+      df_dspderivatives$var=df_dspderivatives[,i.var]
+      
+      df_temp=left_join(df_temp, subset(df_dspderivatives, select=c("dspid", "var")), by="dspid")
+      
+      # getting t statistics
+      t_primary=t.test(var~SC2group, data=subset(df_temp, df_temp$primarypm=="primary"))
+      t_peritoneal=t.test(var~SC2group, data=subset(df_temp, df_temp$primarypm=="peritoneal"))
+      
+      comp_primary=compare_means(var~SC2group, data=subset(df_temp, df_temp$primarypm=="primary"), method="t.test"); comp_primary$primarypm="primary"
+      comp_peritoneal=compare_means(var~SC2group, data=subset(df_temp, df_temp$primarypm=="peritoneal"), method="t.test"); comp_peritoneal$primarypm="peritoneal"
+      
+      comp_primary$t=t_primary$statistic[[1]]; comp_primary$var=i.var
+      comp_peritoneal$t=t_peritoneal$statistic[[1]]; comp_peritoneal$var=i.var
+      
+      out_ttest=bind_rows(out_ttest, bind_rows(comp_primary, comp_peritoneal))
+      
+      plot_violin=ggplot() +
+        geom_boxplot(aes(y=var, x=SC2group, fill=SC2group), data=df_temp, color="black", draw_quantiles = c(0.5), width=0.2) +
+        labs(x="", title=i.var, y="") + 
+        scale_fill_manual(values=c("steelblue2", "seagreen4"))+
+        facet_wrap(~ primarypm) +
+        theme_classic2()+
+        stat_compare_means(aes(y=var, x=SC2group, fill=SC2group), data=df_temp, method = "t.test", size=2.5) +
+        stat_n_text(aes(y=var, x=SC2group), data=df_temp) +
+        guides(fill="none")
+      
+      print(plot_violin)
+      
+      
+    }
+  
+}
+
+dev.off();dev.off();dev.off()
+
+out_ttest$var=factor(out_ttest$var, levels=rev(unique(out_ttest[order(out_ttest$t), ]$var)))
+out_ttest$p.adj_fdr=ifelse(p.adjust(out_ttest$p, method = "fdr")<0.05, "p<0.05", "n.s.")
+
+pdf(paste(Sys.Date(), "crcpm_dsp_dotplot_progeny.pdf"), height=5, width=3.5)
+
+plot_progeny=ggplot() +
+  geom_point(aes(x=-t, y=var, color=primarypm, alpha=p.adj_fdr), data=out_ttest, size=3.5, stroke=NA) +
+  scale_color_manual(values=c("primary"="dodgerblue3", "peritoneal"="firebrick3")) +
+  theme(legend.position = "top")+
+  labs(x="t-statistic\nhigher in patients with\nno-SC2 | SC2", y="PROGENy pathways", alpha="FDR-adjusted p-value") +
+  geom_vline(xintercept = 0)
+
+print(plot_progeny)
+
+dev.off()
+
+```
+

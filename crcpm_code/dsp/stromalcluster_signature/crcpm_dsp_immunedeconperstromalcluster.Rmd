@@ -1,0 +1,175 @@
+---
+title: "CRCPM Immune decon for stromal clusters"
+author: "Joseph J Zhao"
+date: "4/12/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+package.name=c(
+  # data manipulation
+  "tidyverse", "readr", "readxl", "dplyr", "tidyr", "lubridate", "tibble", "plyr", "devtools", "stringr", "stringi", "gtools",
+  # parallel processing
+  "doParallel", "parallel", "foreach", 
+  # bioinformatics
+  "DESeq2", "BiocParallel", "clusterProfiler", "singscore", "GSVA", "CMScaller", "EnvStats", "org.Hs.eg.db",
+  # survival analysis
+  "survminer", "survival", "rstpm2", "survRM2",
+  # regression stuff
+  "MASS", "splines", "Hmisc", "rms",
+  # misc
+  "cluster", "ResourceSelection", "digitize", "reshape2",
+  # plotting
+  "blandr", "pheatmap", "ggrepel", "ggplot2", "corrplot", "ggpubr", "gplots", "grid"
+)
+
+for (package.name in package.name){
+  tryCatch(
+  {
+  if (!require(package.name, character.only = TRUE)){ 
+    install.packages(package.name, character.only = TRUE) 
+    library(package.name, character.only = TRUE)} else {library(package.name, character.only = TRUE)}
+  }, 
+    error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+```
+
+## Set main working directory
+
+```{r working directory}
+wd="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/"
+setwd(wd)
+
+dir.create(paste(wd,"output/", Sys.Date(), sep=""))
+setwd(paste(wd, "output/",Sys.Date(), sep="") )
+
+```
+
+
+################## INCOMPLETE
+
+```{r}
+
+path="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/submissions/substudies/crcpm/submissions/ccr/r1/workings"
+
+dsp_crc=readRDS(paste0(path, "/data/dsp/dsp_crc.rds"))
+
+crcpm_dspstromalclusters <- read_csv(paste0(path, "/data/dsp/crcpm_stromalclusters/crcpm_dspstromalclusters_results.csv"))[-1]
+pData(dsp_crc)=left_join(pData(dsp_crc), crcpm_dspstromalclusters, by="dspid")
+
+df_immunedecon=readRDS(paste0(path, "/data/dsp/immunedecon/df_immunedecon_crc.rds"))
+df_immunedecon$dspid=str_replace_all(str_replace_all(df_immunedecon$id, ".dcc", ""), "-", "_")
+
+df_immunedecon=left_join(df_immunedecon, crcpm_dspstromalclusters, by="dspid")
+df_immunedecon$stromal_cluster[is.na(df_immunedecon$stromal_cluster)]="tumor"
+
+df_immunedecon$var=str_replace_all(df_immunedecon$var, "\\.", " ")
+
+```
+
+
+```{r}
+
+df_immunedecon$sc2_updown=ifelse(df_immunedecon$var %in% c("fibroblasts", "B", "macrophages", "mDCs"), 
+                                 "increased in SC2", 
+                                 ifelse(df_immunedecon$var %in% c("CD4 T cells", "CD8 T cells"), "decreased in SC2", NA))
+
+df_immunedecon$sc2_updown=factor(df_immunedecon$sc2_updown, levels=c("increased in SC2", "decreased in SC2"))
+
+plot_box_cell=ggplot(aes(x=var, y=value, fill=stromal_cluster), data=subset(df_immunedecon, !is.na(df_immunedecon$sc2_updown))) +
+  labs(title = "Immune cell type comparisons across compartments", y="", x="", fill="") +
+    geom_boxplot(width=0.4, outlier.size=0.5)+
+  theme_classic2()+
+  facet_grid(~sc2_updown, scales = "free", space="free_x")+
+  scale_y_log10()+
+  stat_compare_means(method="anova", label = "p", label.y = 0.8)+
+  scale_fill_manual(values=c("SC1"="goldenrod3", "SC2"="seagreen4", "SC3"="pink3", "tumor"="steelblue3"))
+
+print(plot_box_cell)
+
+pdf(paste(Sys.Date(), "crcpm_stromalcluster_immunedecon",".pdf"), height=4, width=8)
+print(plot_box_cell)
+dev.off();dev.off();dev.off()
+
+```
+
+# focus on T cells and pairwise comparisons against tumor
+
+```{r}
+
+my_comparisons=list(c("SC1", "tumor"),
+                    c("SC2", "tumor"))
+
+ggplot(aes(x=stromal_cluster, y=value+1, color=stromal_cluster), data=subset(df_immunedecon, grepl("T", df_immunedecon$var) & !df_immunedecon$stromal_cluster=="SC3") ) +
+  geom_point(position = position_jitterdodge(0.1, dodge.width = .1))+
+  labs(title = "Immune cell type comparisons across compartments", y="", x="", fill="") +
+  # geom_point(width=0.4, outlier.size=0.5)+
+  stat_summary(fun = "mean", size = 3, shape=95, color="black") +
+  theme_classic2()+
+  stat_n_text()+
+  facet_grid(~var, scales = "free", space="free_x")+
+  scale_y_log10()+
+  stat_compare_means(comparisons = my_comparisons, label = "p", method="t.test")+
+  scale_color_manual(values=c("SC1"="goldenrod3", "SC2"="seagreen4", "SC3"="pink3", "tumor"="steelblue3"))
+
+
+```
+
+
+# retrieve signatures
+cibersort 25822800
+bcell 25800755
+
+```{r}
+
+l_gs_immune=readRDS(paste0(path, "/data/reference/genesets/l_gsimmune.RData"))
+
+genesets_aurora_PMID_36585450 <- read_excel(paste0(path, "/data/reference/genesets/genesets_aurora_PMID.36585450.xlsx"), sheet = "modules")
+genesets_aurora_PMID_36585450=subset(genesets_aurora_PMID_36585450, grepl("25822800|25800755", genesets_aurora_PMID_36585450$Name))
+
+l_gs_aurora=list()
+
+for (gs in genesets_aurora_PMID_36585450$Name){
+  gene_id=as.vector(na.omit(t(genesets_aurora_PMID_36585450[genesets_aurora_PMID_36585450$Name==gs,-c(1:4)])))
+  l_gs_aurora[[gs]]=as.vector(na.omit(mapIds(org.Hs.eg.db, as.character(unlist(gene_id)), "SYMBOL","ENTREZID")))
+}
+
+l_gs_immune=c(l_gs_immune, l_gs_aurora)
+
+```
+
+```{r}
+
+df_gsva_immunecell=data.frame(t(gsva(gsvaParam(dsp_crc@assayData$q_norm, l_gs_immune)) )) 
+df_gsva_immunecell=subset(df_gsva_immunecell, select=grep("Kieffer|Macrophages|25800755|T.cell.exhaustion", colnames(df_gsva_immunecell), value=T))
+
+colnames(df_gsva_immunecell)=str_replace_all(str_replace_all(colnames(df_gsva_immunecell), "_", " "), "Kieffer | J.Clin.Oncol.2015 PMID.25800755| Nat.Methods.2015 PMID.25822800|CIBERSORT ", "")
+
+df_gsva_immunecell$dspid=rownames(df_gsva_immunecell)
+df_gsva_immunecell=left_join(df_gsva_immunecell, crcpm_dspstromalclusters, by="dspid")
+df_gsva_immunecell$stromal_cluster[is.na(df_gsva_immunecell$stromal_cluster)]="tumor"
+
+df_gsva_immunecell_melt=melt(df_gsva_immunecell)
+
+df_gsva_immunecell_melt$cell_type=ifelse(grepl("CAF", df_gsva_immunecell_melt$variable), "CAF", 
+                                         ifelse(grepl("Bcells", df_gsva_immunecell_melt$variable), "B cells", ifelse(grepl("Macro", df_gsva_immunecell_melt$variable), "Macrophages", "T cells")))
+
+# print
+
+plot_box_cell=ggplot(aes(x=variable, y=value, fill=stromal_cluster), data=df_gsva_immunecell_melt) +
+  labs(title = "Immune cell subtype comparisons across compartments", y="", x="", fill="") +
+    geom_boxplot(width=0.4)+
+  theme_classic2()+
+  facet_wrap(~cell_type, scales = "free", nrow=4)+
+  stat_compare_means(method="anova", label = "p.signif", label.y = 0.8)+
+  scale_fill_manual(values=c("SC1"="goldenrod3", "SC2"="seagreen4", "SC3"="pink3", "tumor"="steelblue3"))
+
+
+pdf(paste(Sys.Date(), "crcpm_stromalcluster_immunedecon_subtype",".pdf"), height=7.5, width=10)
+print(plot_box_cell)
+dev.off();dev.off();dev.off()
+
+```

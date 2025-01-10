@@ -1,0 +1,231 @@
+---
+title: "CRCPM target gene analysis - prognostic impact"
+author: "Joseph J Zhao"
+date: "4/12/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+package.name=c(
+  # data manipulation
+  "tidyverse", "readr", "readxl", "dplyr", "tidyr", "lubridate", "tibble", "plyr", "devtools", "stringr", "stringi", "gtools",
+  # parallel processing
+  "doParallel", "parallel", "foreach", "doSNOW",
+  # bioinformatics
+  "DESeq2", "BiocParallel", "clusterProfiler", "DGEobj.utils", "umap", "GSVA", "singscore",
+  # survival analysis
+  "survminer", "survival", "rstpm2", "survRM2",
+  # regression stuff
+  "MASS", "splines", "Hmisc", "rms",
+  # misc
+  "cluster", "ResourceSelection", "digitize",
+  # plotting
+  "blandr", "pheatmap", "ggrepel", "ggplot2", "corrplot", "ggpubr", "gplots", "grid", "gridExtra", "EnvStats"
+)
+
+for (package.name in package.name){
+  tryCatch(
+  {
+  if (!require(package.name, character.only = TRUE)){ 
+    install.packages(package.name, character.only = TRUE) 
+    library(package.name, character.only = TRUE)} else {library(package.name, character.only = TRUE)}
+  }, 
+    error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+```
+
+## Set main working directory
+
+```{r working directory}
+wd="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/"
+setwd(wd)
+
+dir.create(paste(wd,"output/", Sys.Date(), sep=""))
+setwd(paste(wd, "output/",Sys.Date(), sep="") )
+
+```
+
+# Load data
+
+```{r}
+
+path="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/submissions/substudies/crcpm/submissions/ccr/r1/workings"
+
+l_gipm_rnaseq <- readRDS(paste0(path,"/data/wts/l_crc_rnaseq.rds"))
+df_rna=l_gipm_rnaseq$gene_count
+df_rna_norm=l_gipm_rnaseq$gene_log2fpkm
+
+df_ref <-  read_excel(paste0(path,"/data/reference/df_ref_pm_persample_annotated_crc.xlsx"))
+df_ref=subset(df_ref, df_ref$rnaseq==1) %>% as.data.frame()
+rownames(df_ref)=df_ref$rnaseqid
+
+df_ref_pm_perpatient <- read_excel(paste0(path,"/data/reference/df_ref_pm_perpatient_crc.xlsx"))
+
+df_rna=df_rna[, colnames(df_rna) %in% df_ref$rnaseqid]
+df_rna_norm=df_rna_norm[, colnames(df_rna_norm) %in% df_ref$rnaseqid]
+
+df_ref=subset(df_ref, df_ref$rnaseqid %in% colnames(df_rna_norm))
+rownames(df_ref)=df_ref$rnaseqid
+
+table(df_ref$sampletype, df_ref$gccrc)
+
+
+```
+
+#### define genes of interest
+
+LAIR2 LAIR1 C1QA LAIR2/LAIR1
+
+CCL15,  CCR1, CCR3, CCL22, CCR4, IL15, CXCL5 , DEFB1, PDK5, PLIN2
+
+
+```{r}
+
+# individual genes
+genes_tumor=c("SERPINE1", "FGFR1", "FGFR2", "PDL1", "MET", "RAS", "RAF", "MEK", "BRAF", "EGFR", "MYC", "PIK3CA", "DKK1", "TROP2A", "TACSTD2", "APC", "FBXW7", "NFE2L2", "PIK3R1", "KAL1", "NOTCH1", "SMAD4", "NTRK\\d{1}", "KEAP1", "CTNNB1", "MLH1", "STK11", "TEAD\\d{1}", "HPSE", "HPSE2", "MSN")
+
+genes_kreidieh=c("CTLA4", "PD1", "PDL1", "LAG3", "TIM3", "TIGIT", "PVRIG", "NKG2A", "KLRC1", "CD73", "ADORA2A", "CD3", "CD19", "PMEL", "BCMA", "TNFRSF17", "CD16", "CEA", "EPCAM", "CD155")
+genes_immune=c("CD4A", "CD8A", "CTLA4", "FOXP3", "GZM1", "GZMB", "IFNG", "LAG3", "PDCD1", "CD274", "PRF1", "HAVCR2", "TIGIT", "ILT", "IDO\\d{1}", "PDL2")
+genes_immune=c(genes_immune, genes_kreidieh) %>% unique
+
+# check if in rnaseq
+genes_tumor=c(rownames(df_rna)[grep(paste(paste0("^", genes_tumor, "$"), collapse="|"), rownames(df_rna))])
+genes_immune=c(rownames(df_rna)[grep(paste(paste0("^", genes_immune, "$"), collapse="|"), rownames(df_rna))])
+
+genes=c(genes_tumor, genes_immune)
+
+```
+
+#### combine individual expression with reference sheet
+
+```{r}
+
+# genes
+df_ref_exp=merge(df_ref, t(data.frame(df_rna_norm[genes,])), by="row.names")
+rownames(df_ref_exp)=df_ref_exp$Row.names; df_ref_exp$Row.names=NULL
+
+```
+
+# Survival
+Convert values into mean per patient
+Recombine with survival data
+
+
+```{r}
+
+# genesorgs=c(genes)
+genesorgs=c("SERPINE1", "DKK1", "FGFR1", "NTRK2", "TEAD1", "PIK3CA", "PDCD1", "PRF1", "IFNG", "HAVCR2", "TNFRSF17", "EPCAM") # manually selected from top genes of interest
+
+# cutoff reference
+df_cutoff_ref=cbind(cutoff=c("median", "q1q4", "thirds"), gap=c(0, 0.25, 1/6)) %>% data.frame
+df_cutoff_ref$gap=df_cutoff_ref$gap %>% as.numeric
+
+df_targetgene_surv=NULL
+
+pdf(paste(Sys.Date(), "crcpm_targetgene_km",".pdf"), height=3.5, width=4)
+for (i.geneorgs in genesorgs){
+  for (i.cutoff in 1){
+  df_ref_exp_temp=df_ref_exp
+  colnames(df_ref_exp_temp)[colnames(df_ref_exp_temp)==i.geneorgs]="gene"
+    
+  df_ref_exp_temp=subset(df_ref_exp_temp, select=c("patientid", "sampletype", "gene"))
+  
+  df_ref_exp_temp=aggregate(gene ~ patientid + sampletype  , data = df_ref_exp_temp, mean)
+  
+  for (i.sampletype in c("primarynormal", "primarytumor", "peritonealtumor", "peritonealnormal")){
+    
+    df_ref_exp_surv=subset(df_ref_exp_temp, df_ref_exp_temp$sampletype==i.sampletype)
+    
+    df_ref_exp_surv=left_join(df_ref_exp_surv, subset(df_ref_pm_perpatient, select=c("patientid", "surv_os_status", "surv_os_time")), by="patientid")
+    
+    df_ref_exp_surv=subset(df_ref_exp_surv, !is.na(df_ref_exp_surv$surv_os_status))
+    
+    # define splits
+    
+    lowercutoff.n=quantile(df_ref_exp_surv$gene, probs = c(0.5-df_cutoff_ref$gap[i.cutoff]))[[1]]
+    uppercutoff.n=quantile(df_ref_exp_surv$gene, probs = c(0.5+df_cutoff_ref$gap[i.cutoff]))[[1]]
+    
+    # define expression categories
+    df_ref_exp_surv$gene_exp=ifelse(df_ref_exp_surv$gene<=lowercutoff.n, "low",
+                                            ifelse(df_ref_exp_surv$gene>=uppercutoff.n, "high", "mid"))
+    
+    i.outcome="surv_os"
+    
+    form=as.formula(paste0("Surv(", i.outcome, "_time, ", i.outcome, "_status) ~ gene_exp"))
+      cox=coxph(form, data=df_ref_exp_surv)
+      
+      sum.cox=summary(cox)
+      
+      km=do.call(survfit, args = list(form, data = df_ref_exp_surv))
+      
+      plot_km=ggsurvplot(
+        km,                     # survfit object with calculated statistics.
+        data = df_ref_exp_surv,  
+        size=0.8,# data used to fit survival curves.
+        risk.table = T,    
+        censor.shape="|",
+        censor.size = 1.2,
+        pval = TRUE,             # show p-value of log-rank test.
+        pval.size=4,
+        legend.title=i.geneorgs,
+        conf.int = F,         # show confidence intervals for 
+        palette = c("purple3", "goldenrod3"),
+        xlim = c(0,max(df_ref_exp_surv$surv_os_time)),
+        ylim = c(0,1),
+        xlab = "Time, days",   # customize X axis label.
+        ggtheme = theme_classic(), # customize plot and risk table with a theme.
+        risk.table.y.text.col = T, # colour risk table text annotations.
+        risk.table.y.text = F,# show bars instead of names in text annotations
+        ncensor.plot = F,     
+        risk.table.fontsize=2.7,
+        tables.theme = theme_cleantable(),
+        ncensor.plot.height = length(cox$xlevels[[1]])*10,
+        legend.labs = (paste(cox$xlevels[[1]])),
+        title=paste0(i.sampletype)
+      )
+
+      print(plot_km)
+      
+      
+      df_targetgene_surv=rbind(df_targetgene_surv, c(geneSymbol=i.geneorgs, sampletype=i.sampletype, hr=sum.cox$coefficients[[2]], p=sum.cox$sctest[[3]]))
+       
+    }
+  }
+}
+
+dev.off();dev.off();dev.off();dev.off()
+
+```
+
+## dotplot of HR
+
+```{r}
+
+df_targetgene_surv=df_targetgene_surv %>% as.data.frame()
+df_targetgene_surv[,3:4]=apply(df_targetgene_surv[,3:4], 2, as.numeric)
+
+df_targetgene_surv_hr=reshape2::dcast(formula=geneSymbol~sampletype, subset(df_targetgene_surv, select=c("geneSymbol", "sampletype", "hr")), value.var = "hr")
+df_targetgene_surv_p=reshape2::dcast(formula=geneSymbol~sampletype, subset(df_targetgene_surv, select=c("geneSymbol", "sampletype", "p")), value.var = "p")
+
+df_targetgene_surv$hr[df_targetgene_surv$hr>5]=1
+df_targetgene_surv$prognosis=ifelse(df_targetgene_surv$hr<1, "poor survival with high expression", "poor survival with low expression")
+
+df_targetgene_surv$target=c(rep("tumor-related", 24), rep("immune-related", 24))
+
+plot_surv=ggplot()+
+  geom_point(aes(x=geneSymbol, y=sampletype, color=prognosis, alpha=p<0.05, size=abs(log(hr))), data=subset(df_targetgene_surv, df_targetgene_surv$sampletype %in% c("primarytumor", "peritonealtumor"))) +
+  guides(alpha="none", size="none") +
+  labs(x="", y="", color="") +
+  facet_wrap(~target,  scales = "free_x") +
+  theme(legend.position = "top")
+
+pdf(paste(Sys.Date(), "crcpm_targetgene_survdotplot",".pdf"), height=2.6, width=8)
+print(plot_surv)
+dev.off(); dev.off();dev.off()
+
+```
+
+

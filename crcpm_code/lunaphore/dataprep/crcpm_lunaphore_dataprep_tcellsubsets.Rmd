@@ -1,0 +1,288 @@
+---
+title: "Lunaphore - data prep - cell type retreival - for t cell subsets"
+author: "Joseph J Zhao"
+date: "11/6/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+package.name=c(
+  # data manipulation
+  "tidyverse", "readr", "readxl", "dplyr", "tidyr", "lubridate", "tibble", "plyr", "stringr", "stringi", "gtools", "maditr", "reshape2",
+  # parallel processing
+  "doParallel", "parallel", "foreach",
+  # bioinformatics
+  "DESeq2","preprocessCore", "umap", "DGEobj.utils", "edgeR", "sva", "sf", "RANN", "spatstat",
+  # survival analysis
+  "survminer", "survival", "rstpm2", "survRM2",
+  # regression stuff
+  "MASS", "splines",
+  # misc
+  "cluster", "ResourceSelection", "digitize", "statip", "dad",
+  # plotting
+  "blandr", "pheatmap", "ggrepel", "ggplot2", "corrplot", "ggpubr", "gplots", "grid", "ggbiplot", "ggsankey", "ggVennDiagram"
+)
+
+for (package.name in package.name){
+  tryCatch(
+  {
+  if (!require(package.name, character.only = TRUE)){ 
+    install.packages(package.name, character.only = TRUE) 
+    library(package.name, character.only = TRUE, quietly = T)} else {library(package.name, character.only = TRUE, quietly = T)}
+  }, 
+    error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+
+```
+
+## Set main working directory
+
+```{r working directory}
+wd="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/"
+setwd(wd)
+
+dir.create(paste(wd,"output/", Sys.Date(), sep=""))
+setwd(paste(wd, "output/",Sys.Date(), sep="") )
+
+```
+
+## create storage list
+
+```{r}
+
+l_lunaphore_crcpm=list()
+
+path="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/submissions/substudies/crcpm/submissions/ccr/r1/workings"
+
+```
+
+
+## load data
+
+percell
+- df_expraw_percell - seperate file as too big
+- df_expbinary_percell
+- df_ref_percell
+
+```{r}
+
+# per cell information
+wd_rawdata="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/data/lunaphore/crcpm/240625_Peritoneal_raw/raw_data/"
+
+files <- list.files(path = wd_rawdata, pattern = paste("raw_data.csv",sep=""), full.names = T)
+df_percell <- sapply(files, read_csv, simplify=F) %>% bind_rows(.id = "id")
+
+df_percell$id=str_replace_all(df_percell$id, wd_rawdata, "")
+
+df_percell$jobid=str_extract(df_percell$id, "NCIR-.*(?=_CRC|_S09)")
+df_percell$lunaphoreid=str_replace_all(df_percell$id, ".ome-raw_data.csv|NCIR-.*(?=CRC|S09)", "")
+colnames(df_percell)[2]="cellid"
+
+df_percell$well_name=str_split(df_percell$cellid, "\\.", simplify=T)[,1]
+df_percell$cellid=paste0(df_percell$lunaphoreid,"_",  df_percell$cellid)
+
+# roi level information
+files <- list.files(path = wd_rawdata, pattern = paste("ROI_info.csv",sep=""), full.names = T)
+df_perroi <- sapply(files, read_csv, simplify=F) %>% bind_rows(.id = "id")
+df_perroi$lunaphoreid=str_replace_all(df_perroi$slide_name, ".ome", "")
+df_perroi$id=NULL; df_perroi$slide_name=NULL
+
+### combine per cell and per roi
+df_percell=left_join(df_percell, df_perroi, by=c("lunaphoreid", "well_name"))
+
+# export to clean files
+## reference table
+ihcmarker=str_replace_all(grep("whole-cell", colnames(df_percell), value=T), " \\(whole-cell\\)", "")
+df_ref_percell=subset(df_percell, select=!grepl(paste(ihcmarker, collapse="|"), colnames(df_percell)))
+df_ref_percell$id=NULL
+sample_info <- read_csv("C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/data/lunaphore/crcpm/240625_Peritoneal_raw/sample_info.csv")
+colnames(sample_info)[1]="lunaphoreid"
+sample_info$Job_ID=NULL
+
+df_ref_percell$roiid=paste0(df_ref_percell$lunaphoreid, "_", df_ref_percell$well_name)
+df_ref_percell=left_join(df_ref_percell, sample_info, by="lunaphoreid")
+colnames(df_ref_percell)=str_replace(colnames(df_ref_percell), " ", "_")
+
+df_ref_percell$X_position_slide=df_ref_percell$X_position+df_ref_percell$originX
+df_ref_percell$Y_position_slide=df_ref_percell$Y_position+df_ref_percell$originY
+
+## binary expression
+df_expbinary_percell=subset(df_percell, select=c("cellid", paste0(ihcmarker, "+")))
+
+## raw expression
+df_expraw_percell=subset(df_percell, select=c("cellid", grep(paste(ihcmarker, collapse=" |"), colnames(df_percell), value=T)))
+
+# include into the list
+l_lunaphore_crcpm$df_ref_percell=df_ref_percell
+l_lunaphore_crcpm$df_expbinary_percell=df_expbinary_percell
+
+```
+
+defining cell types
+
+```{r}
+
+df_ref_lunaphore_celltype <- read_excel(paste0(path,"/data/lunaphore/reference/df_ref_lunaphore_celltype_tcellsubsets.xlsx"))
+
+l_celltype=list()
+
+for (i.celltype in df_ref_lunaphore_celltype$celltype){
+
+  ihcmarker_pos=as.vector(str_split(df_ref_lunaphore_celltype$ihcmarker_pos[df_ref_lunaphore_celltype$celltype==i.celltype], "; ", simplify=T))
+  ihcmarker_neg=as.vector(str_split(df_ref_lunaphore_celltype$ihcmarker_neg[df_ref_lunaphore_celltype$celltype==i.celltype], "; ", simplify=T))
+  
+  
+  df_temp_ihcmarker=df_expbinary_percell
+  
+  for (i.ihcmarker in ihcmarker_pos){
+    
+    df_temp_ihcmarker=subset(df_temp_ihcmarker, as.vector(unlist(df_temp_ihcmarker[, grep(paste0(i.ihcmarker, "\\+"), colnames(df_temp_ihcmarker))]))==1)
+    if(nrow(df_temp_ihcmarker)){next()}
+    
+  }
+  
+  for (i.ihcmarker in ihcmarker_neg){
+    
+    df_temp_ihcmarker=subset(df_temp_ihcmarker, as.vector(unlist(df_temp_ihcmarker[, grep(paste0(i.ihcmarker, "\\+"), colnames(df_temp_ihcmarker))]))==0)
+    
+  }
+  
+  l_lunaphore_crcpm$df_ref_percell$celltype[l_lunaphore_crcpm$df_ref_percell$cellid %in% df_temp_ihcmarker$cellid]=i.celltype
+  
+  l_celltype[[i.celltype]]=df_temp_ihcmarker$cellid
+
+}
+
+# inspect overlaps
+pdf(paste(Sys.Date(),paste0("_lunaphore_celltype_venndiagram.pdf")), height=10, width=12)
+ggVennDiagram(l_celltype[grep("T ", names(l_celltype))])
+dev.off()
+
+```
+
+ihc markers
+
+```{r}
+
+ihcmarker=str_replace_all(grep("whole-cell", colnames(df_percell), value=T), " \\(whole-cell\\)", "")
+l_lunaphore_crcpm$ihcmarker=ihcmarker
+
+```
+
+TSI boundaries
+
+```{r}
+
+wd_annotations="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/data/lunaphore/crcpm/240625_Peritoneal_raw/240416_Peritoneal_ROI_Annotations/"
+
+files <- list.files(path = wd_annotations, pattern = paste(".geojson",sep=""), full.names = T)
+
+for (i.files in files){
+  
+  geo=st_read(i.files)
+  geo$name %>% print
+  
+  lunaphoreid=str_replace_all(str_replace_all(i.files, wd_annotations, ""), ".geojson", "")
+  
+  tsiboundary=data.frame()
+  
+  if(!any(grepl("Boundary|boundary", geo$name))){
+    n_boundary=NULL
+    for (i.roi in 1:length(geo$geometry)){
+      
+        if(nrow(as.matrix(geo$geometry[[i.roi]]))>5){n_boundary=c(n_boundary, i.roi)}
+    }
+    
+    geo$name[n_boundary]="Boundary"
+  }
+  
+    for (i.roi in grep("Boundary|boundary", geo$name)){
+      m_boundary=as.matrix(geo$geometry[[i.roi]]) %>% as.data.frame
+      
+      tsiboundary=bind_rows(tsiboundary, m_boundary)
+    }
+  
+  colnames(tsiboundary)=c("X", "Y")
+  
+  l_lunaphore_crcpm$tsiboundary[[lunaphoreid]]=tsiboundary
+
+}
+
+
+
+
+```
+
+defining distances from tsi per cell
+
+```{r}
+
+l_lunaphore_crcpm$df_ref_percell$dist_tsi=NA
+
+for (i.lunaphoreid in unique(l_lunaphore_crcpm$df_ref_percell$lunaphoreid)){
+  
+  nearest <- nn2(l_lunaphore_crcpm$tsiboundary[[i.lunaphoreid]], subset(l_lunaphore_crcpm$df_ref_percell, l_lunaphore_crcpm$df_ref_percell$lunaphoreid==i.lunaphoreid, select=c("X_position_slide", "Y_position_slide")), k=1)
+  
+  l_lunaphore_crcpm$df_ref_percell$dist_tsi[l_lunaphore_crcpm$df_ref_percell$lunaphoreid==i.lunaphoreid]=as.vector(nearest$nn.dists)
+  
+}
+
+ggplot() +
+  geom_violin(aes(x=roi_type, y=dist_tsi), data=l_lunaphore_crcpm$df_ref_percell) + 
+  scale_y_log10()
+  # stat_n_text()
+
+table( l_lunaphore_crcpm$df_ref_percell$primarypm, l_lunaphore_crcpm$df_ref_percell$roi_type, l_lunaphore_crcpm$df_ref_percell$celltype)
+
+
+```
+
+Retrieve per roi information
+
+```{r}
+
+# matrix of density
+df_celltypedensity_perroi=as.data.frame.matrix(table(l_lunaphore_crcpm$df_ref_percell$roiid, l_lunaphore_crcpm$df_ref_percell$celltype))
+
+# reference sheet
+df_ref_perroi=unique(subset(l_lunaphore_crcpm$df_ref_percell, select=c( "patientid", "lunaphoreid","roiid","well_name", "primarypm", "roi_type", "originX", "originY")))
+df_ref_perroi$tumorcoreX=df_ref_perroi$originX+1024
+df_ref_perroi$tumorcoreY=df_ref_perroi$originY+1024
+
+## retrieve dist_tsi per roi
+df_ref_perroi$dist_tsi=NA
+
+for (i.lunaphoreid in unique(df_ref_perroi$lunaphoreid)){
+  nearest <- nn2(l_lunaphore_crcpm$tsiboundary[[i.lunaphoreid]], subset(df_ref_perroi, df_ref_perroi$lunaphoreid==i.lunaphoreid, select=c("tumorcoreX", "tumorcoreY")), k=1)
+  df_ref_perroi$dist_tsi[df_ref_perroi$lunaphoreid==i.lunaphoreid]=as.vector(nearest$nn.dists)
+}
+
+df_ref_perroi$dist_tsi[df_ref_perroi$roi_type=="Tumor"]=-df_ref_perroi$dist_tsi[df_ref_perroi$roi_type=="Tumor"]
+df_ref_perroi$dist_tsi[df_ref_perroi$roi_type=="Tumor_boundary"]=0
+
+df_celltypedensity_perroi_temp=df_celltypedensity_perroi; df_celltypedensity_perroi_temp$roiid=rownames(df_celltypedensity_perroi_temp)
+
+df_ref_perroi=left_join(df_ref_perroi, df_celltypedensity_perroi_temp, by="roiid")
+df_ref_perroi$patientid=as.character(df_ref_perroi$patientid)
+
+l_lunaphore_crcpm$df_ref_perroi=df_ref_perroi
+l_lunaphore_crcpm$df_celltypedensity_perroi=df_celltypedensity_perroi
+  
+
+
+```
+
+export
+
+```{r}
+
+saveRDS(l_lunaphore_crcpm, paste0(path,"/data/lunaphore/l_lunaphore_crcpm_tcellsubsets.rds"))
+# saveRDS(df_expraw_percell, "C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/data/lunaphore/crcpm/peritoneal_processed/df_expraw_percell_tcellsubsets.rds")
+
+```
+
+
+

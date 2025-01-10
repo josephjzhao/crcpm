@@ -1,0 +1,128 @@
+---
+title: "DESeq"
+author: "Joseph J Zhao"
+date: "4/12/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+package.name=c(
+  # data manipulation
+  "tidyverse", "readr", "readxl", "dplyr", "tidyr", "lubridate", "tibble", "plyr", "devtools", "stringr", "stringi", "gtools",
+  # parallel processing
+  "doParallel", "parallel", "foreach",
+  # bioinformatics
+  "DESeq2", "BiocParallel", "clusterProfiler",
+  # survival analysis
+  "survminer", "survival", "rstpm2", "survRM2",
+  # regression stuff
+  "MASS", "splines", "Hmisc", "rms",
+  # misc
+  "cluster", "ResourceSelection", "digitize",
+  # plotting
+  "blandr", "pheatmap", "ggrepel", "ggplot2", "corrplot", "ggpubr", "gplots", "grid"
+)
+
+for (package.name in package.name){
+  tryCatch(
+  {
+  if (!require(package.name, character.only = TRUE)){ 
+    install.packages(package.name, character.only = TRUE) 
+    library(package.name, character.only = TRUE)} else {library(package.name, character.only = TRUE)}
+  }, 
+    error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+```
+
+## Set main working directory
+
+```{r working directory}
+wd="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/"
+setwd(wd)
+
+dir.create(paste(wd,"output/", Sys.Date(), sep=""))
+setwd(paste(wd, "output/",Sys.Date(), sep="") )
+
+```
+
+# load files
+
+```{r}
+
+l_a5_wts <- readRDS("C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/data/crcpm_a5data/wts/l_a5_wts.rds")
+
+df_rna=l_a5_wts$df_rna_count
+
+df_rna=df_rna[!apply(df_rna, 1, function(x){any(is.na(x))}), ] %>% as.data.frame()
+
+
+df_ref=l_a5_wts$df_rna_ref
+
+df_ref$rnaseqid=str_replace_all(df_ref$rnaseqid, "N_PB|N_PC", "PC")
+df_ref$gccrc="crc"
+
+```
+
+
+# Run Deseq
+
+```{r}
+
+l_de=list()
+
+cat="treatment"
+
+for (i.gccrc in "crc"){
+  for(i.cat in cat){
+    # identify unique groups
+    groups=unique(as.vector(unlist(df_ref[df_ref$gccrc==i.gccrc,i.cat]))) # for now remove the adjacent peritonuem
+    
+    groups=c("A5", "IgG")
+    
+    combs=combinations(length(groups), 2) # create matrix of possible combinations
+  
+    for(i.combs in 1:nrow(combs)){
+      tryCatch({
+      id.1=(df_ref[df_ref[,i.cat]==groups[combs[i.combs,1]],]$rnaseqid) # IDs of group 1
+      id.2=(df_ref[df_ref[,i.cat]==groups[combs[i.combs,2]],]$rnaseqid) # IDs of group 2
+      
+      df_ref_temp=df_ref[df_ref$rnaseqid %in% c(id.1, id.2),]
+      df_ref_temp$cat=as.vector(unlist(df_ref_temp[,i.cat]))
+      df_ref_temp$cat=factor(df_ref_temp$cat, levels = c(groups[combs[i.combs,2]], groups[combs[i.combs,1]])) # to ensure that the comparison direction is the same
+      df_ref_temp=df_ref_temp[order(df_ref_temp$cat), ]
+      
+      df_ref_temp=df_ref_temp[match(colnames(df_rna[,c(id.1, id.2)]), df_ref_temp$rnaseqid),]
+      # cbind(colnames(df_rna[,c(id.1, id.2)]), df_ref_temp$id)
+      
+      # df_rna[,]=apply(df_rna[,], 1, as.integer)
+      
+      # run deseq after truncating dataset
+      dds=DESeqDataSetFromMatrix(countData = df_rna[, colnames(df_rna) %in% c(id.1, id.2)],  
+                                                colData = df_ref_temp,
+                                                design = ~ cat)
+      
+      featureData <- data.frame(gene=rownames(df_rna))
+      mcols(dds) <- DataFrame(mcols(dds), featureData)
+      
+      dds <- DESeq(dds, parallel=TRUE, BPPARAM=MulticoreParam(20))
+      res <- results(dds)
+      l_de[[paste0(groups[combs[i.combs,1]], " vs ", groups[combs[i.combs,2]])]]=res
+      }, 
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+    }
+  }
+}
+
+```
+
+## Save l_de; read l_de
+
+```{r}
+
+saveRDS(l_de, file=paste0(wd, "data/crcpm_a5data/wts/l_a5_de_wts.rds"))
+
+```
+

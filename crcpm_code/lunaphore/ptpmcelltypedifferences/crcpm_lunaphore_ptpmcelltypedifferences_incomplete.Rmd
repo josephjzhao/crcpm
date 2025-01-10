@@ -1,0 +1,127 @@
+---
+title: "PT-PM CRCPM cell type differences"
+author: "Joseph J Zhao"
+date: "11/6/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+package.name=c(
+  # data manipulation
+  "tidyverse", "readr", "readxl", "dplyr", "tidyr", "lubridate", "tibble", "plyr", "stringr", "stringi", "gtools", "maditr", "reshape2",
+  # parallel processing
+  "doParallel", "parallel", "foreach",
+  # bioinformatics
+  "DESeq2","preprocessCore", "umap", "DGEobj.utils", "edgeR", "sva", "sf", "RANN", "spatstat",
+  # survival analysis
+  "survminer", "survival", "rstpm2", "survRM2",
+  # regression stuff
+  "MASS", "splines",
+  # misc
+  "cluster", "ResourceSelection", "digitize", "statip", "dad",
+  # plotting
+  "blandr", "pheatmap", "ggrepel", "ggplot2", "corrplot", "ggpubr", "gplots", "grid", "ggbiplot", "ggsankey", "ggVennDiagram"
+)
+
+for (package.name in package.name){
+  tryCatch(
+  {
+  if (!require(package.name, character.only = TRUE)){ 
+    install.packages(package.name, character.only = TRUE) 
+    library(package.name, character.only = TRUE, quietly = T)} else {library(package.name, character.only = TRUE, quietly = T)}
+  }, 
+    error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+
+```
+
+## Set main working directory
+
+```{r working directory}
+wd="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/"
+setwd(wd)
+
+dir.create(paste(wd,"output/", Sys.Date(), sep=""))
+setwd(paste(wd, "output/",Sys.Date(), sep="") )
+
+```
+
+import
+
+```{r}
+
+path="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/submissions/substudies/crcpm/submissions/ccr/r1/workings"
+
+l_lunaphore_crcpm=readRDS(paste0(path,"/data/lunaphore/l_lunaphore_crcpm.rds"))
+
+```
+
+PT PM differences against TSI
+
+```{r}
+
+# broad heatmap overview
+colMeta=subset(l_lunaphore_crcpm$df_ref_perroi, select=c("primarypm", "roi_type", "dist_tsi")) %>% as.data.frame
+rownames(colMeta)=l_lunaphore_crcpm$df_ref_perroi$roiid
+
+pheatmap(t(l_lunaphore_crcpm$df_celltypedensity_perroi), 
+         scale="column",
+         show_colnames = F,
+         annotation_col = colMeta)
+
+
+```
+
+regression line comparisons between PT PM per cell type
+
+```{r}
+
+df_ref_perroi_melt=reshape2::melt(l_lunaphore_crcpm$df_ref_perroi, variable.names= colnames(l_lunaphore_crcpm$df_celltypedensity_perroi), id.vars=c("patientid", "roiid", "lunaphoreid", "dist_tsi", "primarypm", "roi_type"))
+
+df_ref_perroi_melt=subset(df_ref_perroi_melt, df_ref_perroi_melt$variable%in% colnames(l_lunaphore_crcpm$df_celltypedensity_perroi))
+df_ref_perroi_melt$value=as.numeric(df_ref_perroi_melt$value)
+df_ref_perroi_melt$primarypm=factor(df_ref_perroi_melt$primarypm, levels=c("primary", "peritoneal"))
+df_ref_perroi_melt$value=(df_ref_perroi_melt$value/((2048*(0.23*10e-6))^2))*10e-6
+
+plot_ptpmcelltypes=ggplot() +
+  # geom_point(aes(x=dist_tsi, y=value, color=variable), data=df_ref_perroi_melt) +
+  # scale_y_log10() +
+  theme_classic() +
+  # coord_cartesian(x=c(-20000, 20000)) +
+  facet_wrap(~ primarypm, scales = "free_x") +
+  scale_color_manual(values=c(RColorBrewer::brewer.pal(6, "Dark2")))+
+  labs(x="distance from TSI \ntumor compartment        |        stromal compartment", y=bquote("density, number of immune cells/μm"^2), color="")+
+  geom_smooth(aes(x=dist_tsi, y=value, color=variable), data=df_ref_perroi_melt, alpha=0.1) +
+  geom_vline(xintercept = 0, linetype=2)
+
+pdf(paste(Sys.Date(),paste0("_lunaphore_ptpmcelltype.pdf")), height=3, width=8)
+print(plot_ptpmcelltypes)
+dev.off()
+
+
+```
+
+facetwrap per cell type to overlap and see
+
+```{r}
+
+plot_ptpmcelltypes_percelltype=ggplot() +
+  # geom_point(aes(x=dist_tsi, y=value, color=variable), data=df_ref_perroi_melt) +
+  # scale_y_log10() +
+  theme_classic() +
+  coord_cartesian(x=c(-15000, 15000)) +
+  scale_color_manual(values=c("dodgerblue3", "firebrick3")) +
+  facet_wrap(~ variable, scales = "free") +
+  labs(x="distance from TSI \ntumor compartment        |        stromal compartment", y=bquote("density, number of immune cells/μm"^2), color="")+
+  geom_smooth(aes(x=dist_tsi, y=value, color=primarypm), data=df_ref_perroi_melt, alpha=0.4) +
+  geom_vline(xintercept = 0, linetype=2) + geom_hline(yintercept = 0, linetype=2)
+  
+pdf(paste(Sys.Date(),paste0("_lunaphore_ptpmcelltype_percelltype.pdf")), height=3.5, width=7)
+print(plot_ptpmcelltypes_percelltype)
+dev.off()
+
+```
+

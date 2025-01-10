@@ -1,0 +1,181 @@
+---
+title: "crcpm A5 GSEA"
+author: "Joseph J Zhao"
+date: "9/18/2021"
+output: 
+  html_document: 
+    toc: yes
+editor_options: 
+  chunk_output_type: console
+---
+# GSEA 
+General steps
+1. Calculate fold change values using the DESeq2 package (done, just import)
+2. Throw the fold change values into GSEA
+3. Export the GSEA enrichment scores into a table/dataframe
+4. Export plots (figure a way to combine)
+
+# Setup and working directory
+
+```{r set up}
+package.name=c(# GSEA analysis
+  "clusterProfiler", "enrichplot", "pathview", "msigdbr", "fgsea", "gtools", "DOSE",
+  # bioinformatics
+  "DESeq2", "GSVA",
+  # data manipulation
+  "tidyverse", "reshape", "readr", "readxl", "dplyr", "tidyr", "lubridate", "tibble", "plyr", "devtools", "stringr", "stringi", "rlist",
+  # parallel processing
+  "doParallel", "parallel", "foreach", "doSNOW",
+  # survival analysis
+  "survminer", "survival", "rstpm2", "survRM2",
+  # regression stuff
+  "MASS", "splines", "Hmisc", "rms","twang",
+  # misc
+  "cluster", "ResourceSelection", "digitize", "tableone", "pROC",
+  # plotting
+  "blandr", "pheatmap", "ggrepel", "ggplot2", "corrplot", "ggpubr", "gplots"
+)
+
+for (package.name in package.name){
+  tryCatch(
+  {
+  if (!require(package.name, character.only = TRUE)){ 
+    install.packages(package.name, character.only = TRUE) 
+    library(package.name, character.only = TRUE)} else {library(package.name, character.only = TRUE)}
+  }, 
+    error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+
+```
+
+## Set main working directory
+
+```{r working directory}
+wd="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/"
+setwd(wd)
+
+dir.create(paste(wd,"output/", Sys.Date(), sep=""))
+setwd(paste(wd, "output/",Sys.Date(), sep="") )
+
+```
+
+# Load differential expression data from DESeq2
+
+```{r}
+
+l_de=readRDS(paste0(wd, "data/crcpm_a5data/wts/l_a5_de_wts.rds"))
+
+```
+
+# load pathways
+
+```{r}
+
+l_gspathway=readRDS(paste0(wd, "data/genesets/collated/", "l_gspathway.RData"))
+l_gspathway=l_gspathway[grepl("HALLMARK", names(l_gspathway))]
+
+# prepare for GSEA
+df_genesets=l_gspathway %>% unlist %>% data.frame
+df_genesets$gs_name=str_replace_all(rownames(df_genesets), "(?<=\\w)\\d*$", "")
+df_genesets$gs_name %>% table
+colnames(df_genesets)[1]="gene_symbol"
+
+df_genesets=df_genesets[,c(2,1)]
+df_genesets$gs_name=str_replace_all(df_genesets$gs_name, "HALLMARK", "")
+
+```
+
+# GSEA
+Run the GSEA analysis with hallmark from msigbr
+
+https://rdrr.io/github/aiminy/ModifiedclusterProfiler/f/vignettes/clusterProfiler.Rmd
+https://cran.r-project.org/web/packages/msigdbr/vignettes/msigdbr-intro.html
+
+## Compute GSEA 
+Store into a list so that dont have to keep redoing
+
+```{r run GSEA}
+
+l_GSEA=list() # create list to store GSEA data
+
+for(i.comb in names(l_de)){
+  
+    df_de=l_de[[i.comb]]
+    
+    # load de data
+    original_gene_list <- df_de$log2FoldChange
+    
+    # cleaning
+    names(original_gene_list) <- rownames(df_de) # name the vector
+    gene_list<-na.omit(original_gene_list) # omit any NA values 
+    gene_list=gene_list[is.finite(gene_list)]
+    gene_list = sort(gene_list, decreasing = TRUE) # sort the list in decreasing order (required for clusterProfiler)
+    
+    # GSEA function - takes into consideration the magnitude of change too!
+    gse=GSEA(gene_list, TERM2GENE=df_genesets, verbose=T, pvalueCutoff = 1, pAdjustMethod = "fdr")
+    
+    l_GSEA[[i.comb]]=gse
+    
+    gseaplot(gse, geneSetID = 1, by = "runningScore", title = gse$Description[1])
+    
+}
+
+# save the list for subsequent work
+# saveRDS(l_GSEA, file=paste0(wd, "data/", paste0("l_GSEA.RData")))
+
+```
+
+### visualization
+#### with dot plots
+
+```{r}
+
+pdf(paste(Sys.Date(), "GSEA_dotplot_a5wts.pdf"), height=4, width=5)
+
+for(i.comb in names(l_GSEA)){
+  
+  # prepare data
+  df_GSEA=l_GSEA[[i.comb]] %>% data.frame
+  
+  if(nrow(df_GSEA)==0){next()} # remove comparisons without any pathway identified
+  
+  # cleaning
+  df_GSEA$ID=str_replace(df_GSEA$ID, "HALLMARK ", "")
+  df_GSEA$ID=str_replace_all(df_GSEA$ID, "_", " ")
+  df_GSEA$ID=factor(df_GSEA$ID, levels=unique(df_GSEA$ID[order(df_GSEA$enrichmentScore)]))
+  df_GSEA=subset(df_GSEA, !grepl("prolif",df_GSEA$ID))
+  
+  
+  plot_gseadotplot=ggplot()+
+                    geom_point(aes(x=NES, y=ID, size=setSize, alpha=p.adjust<0.05, color=NES<0), data=subset(df_GSEA, abs(df_GSEA$NES)>1), stroke=NA)+
+                    # scale_color_gradient(low = "darkgoldenrod1", high = "steelblue4")+
+                    scale_size(range=c(3,5))+
+                    # theme_alluvial()+
+                    scale_color_manual(values=c("orange3", "grey10"))+
+                    scale_alpha_manual(values=c(0.7, 1))+
+                    guides(alpha="none", size="none", color="none")+
+                    labs(y="", x=paste0(str_extract(i.comb, "(?<= vs ).*"),"   |   ", str_extract(i.comb, ".*(?= vs )"),"\nNES"))+
+                    geom_vline(xintercept=0, col="black") +
+                    theme(legend.position="top") 
+  
+  print(plot_gseadotplot)
+  
+}
+
+dev.off()
+
+```
+
+#### with GSEA plots
+
+```{r}
+pdf(paste(Sys.Date(),"GSEA.pdf"), height=6, width=5)
+for (i in 1:length(gse$Description)){
+  gseaplot2(gse, 
+            title = (str_replace(str_replace_all(gse$Description[i], "_", " "), "HALLMARK ", "")), 
+            geneSetID = i) %>% print
+}
+dev.off()
+
+```

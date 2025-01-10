@@ -1,0 +1,165 @@
+---
+title: "CRC PM Dimension reduction"
+author: "Joseph J Zhao"
+date: "11/6/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+package.name=c(
+  # data manipulation
+  "tidyverse", "readr", "readxl", "dplyr", "tidyr", "lubridate", "tibble", "plyr", "devtools", "stringr", "stringi", "gtools",
+  # parallel processing
+  "doParallel", "parallel", "foreach",
+  # bioinformatics
+  "DESeq2","preprocessCore", "umap", "DGEobj.utils", "edgeR", "sva", "SingleCellExperiment", "slingshot", "mclust", "vegan",
+  # survival analysis
+  "survminer", "survival", "rstpm2", "survRM2",
+  # regression stuff
+  "MASS", "splines", "Hmisc", "rms",
+  # misc
+  "cluster", "ResourceSelection", "digitize", "statip", "dad",
+  # plotting
+  "blandr", "pheatmap", "ggrepel", "ggplot2", "corrplot", "ggpubr", "gplots", "grid", "ggbiplot", "ggsankey"
+)
+
+for (package.name in package.name){
+  tryCatch(
+  {
+  if (!require(package.name, character.only = TRUE)){ 
+    install.packages(package.name, character.only = TRUE) 
+    library(package.name, character.only = TRUE)} else {library(package.name, character.only = TRUE)}
+  }, 
+    error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+
+```
+
+## Set main working directory
+
+```{r working directory}
+wd="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/"
+setwd(wd)
+
+dir.create(paste(wd,"output/", Sys.Date(), sep=""))
+setwd(paste(wd, "output/",Sys.Date(), sep="") )
+
+```
+
+# 1 Unbiased overall UMAP per tumour type (GC: GASCAD + peritoneal cohort; CRC: TCGA + peritoneal cohort)
+
+Create storage list for GC CRC
+
+```{r}
+
+l_rna=list(); l_rna_norm=list(); l_ref=list()
+
+```
+
+
+
+```{r}
+
+path="C:/Users/jzhao/OneDrive/Research_Cloud/NUH_NCIS/gccrc_pm/submissions/substudies/crcpm/submissions/ccr/r1/workings"
+
+l_gipm_rnaseq <- readRDS(paste0(path,"/data/wts/l_crc_rnaseq.rds"))
+
+df_rna=l_gipm_rnaseq$gene_count
+df_rna_norm=l_gipm_rnaseq$gene_log2fpkm
+
+df_ref <- read_excel(paste0(path,"/data/reference/df_ref_pm_persample_annotated_crc.xlsx")) %>% as.data.frame
+df_ref=subset(df_ref, df_ref$rnaseq==1)
+
+df_rna_norm=df_rna_norm[, colnames(df_rna_norm) %in% df_ref$rnaseqid]
+df_rna=df_rna[rownames(df_rna) %in% rownames(df_rna_norm), colnames(df_rna) %in% df_ref$rnaseqid]
+
+l_rna[["crc"]]=df_rna
+l_rna_norm[["crc"]]=df_rna_norm
+l_ref[["crc"]]=df_ref
+
+```
+
+Plot UMAP
+
+Using ggbiplot code to make ellipse
+https://github.com/vqv/ggbiplot/blob/master/R/ggbiplot.r
+
+```{r}
+
+lcols=c("firebrick3", "dodgerblue4")
+
+# pdf(paste(Sys.Date(),"gccrc_dimensionreduction.pdf"), height=2.5, width=4)
+
+i.gccrc="crc"
+
+set.seed(5)
+
+# retrieve tumor specific datasets  
+df_rna_norm=l_rna_norm[[i.gccrc]]
+df_rna=l_rna[[i.gccrc]]
+df_ref=l_ref[[i.gccrc]]
+
+# select samples
+df_ref=subset(df_ref, df_ref$gccrc==i.gccrc & df_ref$tumornormal=="tumor") %>% as.data.frame # take only tumor samples
+rownames(df_ref)=df_ref$rnaseqid
+df_rna=as.matrix(df_rna[,colnames(df_rna) %in% df_ref$rnaseqid])
+df_rna_norm=df_rna_norm[,colnames(df_rna_norm) %in% df_ref$rnaseqid]
+
+# load into singl cell experiment
+sce <- SingleCellExperiment(assays = List(counts = as.matrix(df_rna)))
+assays(sce)$norm <- as.matrix(df_rna_norm)
+
+# dimension reduction
+rd <- umap::umap(t(assays(sce)$norm))
+colnames(rd$layout) <- c('UMAP1', 'UMAP2')
+reducedDims(sce) <- SimpleList(UMAP = rd$layout)
+
+# cluster
+colData(sce)$GMM <- Mclust(rd$layout)$classification
+
+# run slingshot
+if(i.gccrc=="gastric"){i.clus=5} else{i.clus=1}
+sce <- slingshot(sce, clusterLabels = 'GMM', reducedDim = 'UMAP', start.clus =i.clus)
+
+# prep UMAP
+df_umap=as.data.frame(rd$layout)
+df_umap=merge(df_umap, df_ref, by="row.names")
+colnames(df_umap)[2:3]=c("UMAP1", "UMAP2")
+
+df_umap$group=paste0(df_umap$primarypm, "", df_umap$tumornormal)
+
+curves <- slingCurves(sce, as.df = TRUE)
+slingcurve=slingCurves(sce)
+
+df_umap$pseudotime=data.frame(slingcurve$Lineage1$lambda)[df_umap$Row.names, ]
+
+# plot umap -----   
+plot_umap=ggplot()+
+          theme_bw()+
+          geom_point(aes(x = UMAP1, y = UMAP2, color = group), data=df_umap, size=2) +
+          labs(x = "UMAP1", y = "UMAP2", color="") +
+          scale_color_manual(values=lcols[1:length(unique(df_umap$group))]) 
+
+print(plot_umap)
+
+# dev.off(); dev.off();dev.off();dev.off();dev.off()
+
+# umap of only paired data
+df_umap_paired=subset(df_umap, df_umap$patientid%in%rownames(table(df_umap$patientid, df_umap$primarypm))[!apply(table(df_umap$patientid, df_umap$primarypm), 1, function(x){any(x %in% 0)})])
+
+plot_umap_paired=ggplot()+
+          theme_bw()+
+          geom_point(aes(x = UMAP1, y = UMAP2, color = group), data=df_umap_paired, size=2) +
+          geom_text_repel(aes(x = UMAP1, y = UMAP2, label = patientid), data=df_umap_paired, size=3.5) +
+          labs(x = "UMAP1", y = "UMAP2", color="") +
+          scale_color_manual(values=lcols[1:length(unique(df_umap_paired$group))]) +
+          scale_shape_manual(values=c("synchronous PM"=16, "metachronous PM"=17, "no PM"=15))
+
+pdf(paste(Sys.Date(),"gccrc_dimensionreduction_paired.pdf"), height=5, width=7)
+print(plot_umap_paired)
+dev.off()
+
+```
